@@ -1,0 +1,109 @@
+Job boards - 
+1. For now lets just make it for linkedin posts. User searches 'genai + hiring', gets into posts section and filters posts to last 7 days. 
+
+user action -
+1. clicks some shortcut on keyboard (define shortcut keys based on context and shortcut needs to be max 2 keys) this pops up out extension and it's kind of floating window. Then user selects a post from the screen and extension gets profile name of the person who posted job, linkedinprofile link, job post content. then parses thatjob post content. if it has mail id then reads jd, take resume pdf and based on profile of user in extension drafts mail which can be seen in extension's UI and if user clicks send then it is sent and job details and other details from post that we discussed earlier are saved in database. These details gets saved to db automatically and if user clicks send mail button then this extension can send mail from user's mail id(this setup needs to be done probably using gmail's token or a safer way) 
+
+Tech stack - 
+    Database - POstgresql using cockroachdb
+    backend - Python fastapi
+    authentication - JWT OAuth2
+    authorization - Admin (I will be) and JobSeeker(anyone else)
+    agents - use necessary libraries/opensource frameworks, tools 
+    frontend - whatever is suited for 
+    alembic for migration
+    ORM - SQLAlchemy
+
+User profile - 
+    User fills every detail in UI, also allow scraping those details from resume directly
+    One user can have multiple profiles saved and separated by target job title (in case the are targetting multiple roles like software engineer, gen ai engineer, data engineer)
+    details to extract from resume later can be edited if AI parser parse it wrong or information is missing - 
+        
+        Personal information - 
+            first Name
+            last Name
+            Professional Headline
+            Email Address
+            Phone Number
+            Current City
+            Current State / Province
+            Current Country
+            Willing to Relocate (Yes/No)
+            Preferred Work Locations
+            LinkedIn URL
+            GitHub URL
+            Portfolio Website
+            Personal Website / Blog
+            Date of Birth
+            Nationality
+            Work Authorization / Visa Status
+        Professional Summary - 4-5 lines
+        Technical skills - User should be able to create sections like Cloud and add details like AWS then GCP and so on.
+        Experience - 
+            Job Title
+            Company Name
+            Employment Type
+            Location
+            Start Date
+            End Date
+            Currently Working Here (Yes/No)
+            Responsibilities (multiple)
+            project - 
+                Project name as subtitle
+                details of work done and responsibilities as pointers
+        Personal Projects - 
+            Project Name
+            Details in pointers
+            Demo URL
+            GitHub URL
+        
+
+        Education - 
+            Degree
+            Field of Study / Major
+            Minor / Specialization
+            Institution Name
+            University / Board
+            Location
+            Start Date
+            End Date
+            Graduation Year
+            CGPA / GPA / Percentage
+            Honors / Distinction
+        Certification - 
+            Certification Name
+            Issuing Organization
+            Issue Date
+            Expiry Date
+            Credential ID
+            Credential URL
+        Achievements and Awards
+            Achievement Title
+            Organization
+            Date
+            Description in pointers
+        Languages - 
+            Language
+            Proficiency (Native / Fluent / Professional / Intermediate / Basic)
+
+Metrics tracking - 
+    User - 
+        usage by every user, profile, which agent they used, howmany tokens they used each day and for the day ongoing till the time
+        how many jobs applied and many more
+    Admin - 
+        need to know metrics of each account but don't need their private information. This information is need to knwo how much each user is usign my app and bill them
+
+code structure - Modular monorepo
+    backend
+        main file
+        alembic table migration
+        separate folder for each agent and service
+            Has tables schema
+            input parsing and response schema validation using Pydantic
+            service folder for service files
+            routers folder for routers
+            any other folder you thing for making code modular
+
+    frontend
+        Keep modular and as simple as possible
+
