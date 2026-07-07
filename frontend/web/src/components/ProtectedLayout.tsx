@@ -1,4 +1,4 @@
-import { Navigate, Outlet, useNavigate } from "react-router-dom";
+import { Link, Navigate, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 
 export function ProtectedLayout() {
@@ -16,7 +16,23 @@ export function ProtectedLayout() {
   return (
     <div>
       <div className="topbar">
-        <span className="brand">LinkedIn Job Outreach Assistant</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+          <span className="brand">LinkedIn Job Outreach Assistant</span>
+          <Link to="/profiles" className="muted">
+            Profiles
+          </Link>
+          <Link to="/tracker" className="muted">
+            Tracker
+          </Link>
+          <Link to="/metrics" className="muted">
+            Usage
+          </Link>
+          {user.role === "admin" && (
+            <Link to="/admin" className="muted">
+              Admin
+            </Link>
+          )}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <span className="muted">
             {user.email} · <span className="badge">{user.role}</span>

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,6 +33,14 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Feature 8: bumped on login/signup only (not on every authenticated request/token refresh —
+    # see docs/PROGRESS.md's Feature 8 log for why). Powers the admin dashboard's "last active" column.
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Feature 10 — defaulted to now+30 days at signup (see auth_service.register_user); NULL means
+    # unlimited access. Existing users got NULL on migration (deliberately grandfathered, not
+    # retroactively locked out). Enforced in core/dependencies.get_current_user + authenticate_user.
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class InviteCode(Base):
@@ -45,3 +53,7 @@ class InviteCode(Base):
     is_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Feature 10 — a code is redeemable only if not is_used, not revoked, and (no expiry or still
+    # in the future). See auth_service.register_user's validity check.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

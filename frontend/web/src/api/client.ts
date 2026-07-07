@@ -62,3 +62,21 @@ export async function apiRequest<T>(path: string, init?: RequestInit, isRetry = 
   }
   return body as T;
 }
+
+// Separate from apiRequest because a FormData body needs the browser to set its own
+// multipart/form-data Content-Type (with boundary) — apiRequest always forces application/json.
+export async function apiUpload<T>(path: string, formData: FormData, isRetry = false): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, { method: "POST", credentials: "include", body: formData });
+
+  if (res.status === 401 && !isRetry) {
+    if (await refreshSession()) {
+      return apiUpload<T>(path, formData, true);
+    }
+  }
+
+  const body = await res.json().catch(() => undefined);
+  if (!res.ok) {
+    throw new ApiError(res.status, extractDetail(body) ?? `Request failed with status ${res.status}`);
+  }
+  return body as T;
+}

@@ -71,12 +71,16 @@ export function ProfilesPage() {
 
       {profiles?.map((profile) => (
         <div className="list-item" key={profile.id}>
-          <div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
-              {profile.target_job_title}
+              <span className="truncate" style={{ minWidth: 0 }}>
+                {profile.target_job_title}
+              </span>
               {profile.is_default && <span className="badge">default</span>}
             </div>
-            {profile.professional_summary && <div className="muted">{profile.professional_summary}</div>}
+            {profile.professional_summary && (
+              <div className="muted truncate">{profile.professional_summary}</div>
+            )}
           </div>
           <div className="item-actions">
             <Link to={`/profiles/${profile.id}/view`} className="btn btn-secondary">

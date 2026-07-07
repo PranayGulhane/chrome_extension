@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
@@ -41,6 +42,13 @@ async def get_current_user(
         raise credentials_error
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
+    # Feature 10 — default 30-day access window for new signups (NULL = unlimited, existing users
+    # grandfathered). Same enforcement point for both the extension and the Web SPA.
+    if user.access_expires_at is not None and user.access_expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your access period has expired — contact the admin to extend it",
+        )
 
     return user
 

@@ -104,7 +104,7 @@ export function ProfileViewPage() {
             {skillGroups.map((group) => (
               <div key={group.category} style={{ marginBottom: 10 }}>
                 <strong>{group.category}</strong>
-                <ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>
+                <ul className="skill-grid">
                   {group.skills.map((skill, i) => (
                     <li key={i}>{skill.skill_name}</li>
                   ))}

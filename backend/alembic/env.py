@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import every module's models here so Base.metadata is fully populated
 # before autogenerate compares it against the live schema.
+import agent_usage.models  # noqa: F401
+import applications.models  # noqa: F401
 import auth.models  # noqa: F401
+import gmail.models  # noqa: F401
 import profiles.models  # noqa: F401
 from core.config import get_settings
 from core.database import Base

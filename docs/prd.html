@@ -477,7 +477,7 @@
         <ul class="il">
           <li>Injected by the content script as a fixed-position overlay on the right side of the page (not a Chrome Side Panel, so it works regardless of Chrome version).</li>
           <li>Width: 380px. Does not cover LinkedIn's main feed. Draggable by the user if it overlaps content.</li>
-          <li>The panel has three views: <strong>Home</strong> (post selection + email draft flow), <strong>History</strong> (recent applications), <strong>Profile</strong> (quick profile switcher).</li>
+          <li>The panel has three tabs: <strong>Extract</strong> (post selection + email draft flow), <strong>History</strong> (recent applications, with a "Show archived" toggle), <strong>Usage</strong> (per-user metrics). An "Open web app ↗" link is always visible above the tabs, opening the standalone Web SPA (profile management, full tracker, admin dashboard) in a new tab — no need to bookmark it separately.</li>
           <li>Authentication state is read from backend JWT stored in <code>chrome.storage.local</code>. Unauthenticated state shows a login prompt.</li>
           <li>The panel is built as a React app injected into a shadow DOM root to prevent CSS conflicts with LinkedIn.</li>
         </ul>
@@ -602,7 +602,21 @@
     <!-- 10 Application Tracker -->
     <section class="section" id="f-tracker">
       <div class="sec-head"><span class="sec-num">10</span><h2 class="sec-title">Application Tracker</h2></div>
-      <div class="prose"><p>Every post that the user clicks — whether or not they send an email — is saved as an application record. The tracker is accessible from the extension panel's History tab and from a standalone web UI.</p></div>
+      <div class="prose"><p>Every post that the user clicks — whether or not they send an email — is saved as an application record. The tracker is accessible from the extension panel's History tab and from a standalone web UI. Records can be <strong>archived</strong> (e.g. no longer expecting a response, or a rejection) without deleting them — archived records are hidden by default behind a "Show archived" toggle in both surfaces, and archiving never changes the record's <code>status</code>.</p></div>
+      <div class="subsec">
+        <h3 class="subsec-title">Duplicate-Contact Warning</h3>
+        <div class="prose"><p>Immediately after a post is extracted (before any drafting starts), the backend checks whether the user has already contacted this same poster or recipient from a <em>different, already-sent</em> application — matching on the poster's LinkedIn profile URL (always known at extraction) or the parsed recipient email (case-insensitive), whichever is available. If a match is found, the extension panel shows a non-blocking warning right on the extraction result, naming who/when it matched, with two options:</p></div>
+        <div class="tw">
+          <table>
+            <thead><tr><th>Option</th><th>Behavior</th></tr></thead>
+            <tbody>
+              <tr><td>View that application</td><td>Opens the matched record in an in-panel popup (not a new tab) — the user's current extraction result stays exactly as it was underneath.</td></tr>
+              <tr><td>Don't save this</td><td>Deletes the just-created (redundant) application record and returns to post-selection. Only allowed while the new record is still unactioned (<code>status = extracted</code>, no draft generated yet) — once a draft exists, the record represents real work and can no longer be discarded this way.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="prose"><p>This is advisory only — the user can always proceed with drafting and sending again regardless of the warning. Every application is still auto-saved on extraction by default; the discard option is the one deliberate exception, scoped narrowly to the moment a duplicate is flagged and before any drafting begins.</p></div>
+      </div>
       <div class="tw">
         <table>
           <thead><tr><th>Field</th><th>Description</th></tr></thead>
@@ -623,6 +637,7 @@
             <tr><td>Resume Attached</td><td>UUID reference to the <code>resume_uploads</code> row that was attached — preserves which version was sent even if the user later uploads a new resume</td></tr>
             <tr><td>Sent At</td><td>UTC timestamp of send event</td></tr>
             <tr><td>Created At</td><td>UTC timestamp of extraction</td></tr>
+            <tr><td>Archived</td><td>Boolean, independent of <code>status</code> — can be set at any lifecycle stage. Hidden from the default tracker view; toggled via a "Show archived" checkbox.</td></tr>
           </tbody>
         </table>
       </div>
@@ -911,6 +926,9 @@
             <span class="schema-field"><span class="field-name">role</span><span class="field-type">enum</span></span>
             <span class="schema-field"><span class="field-name">is_active</span><span class="field-type">bool</span></span>
             <span class="schema-field"><span class="field-name">created_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">last_login_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">access_expires_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">admin_notes</span><span class="field-type">text</span></span>
           </div>
         </div>
         <div class="schema-card">
@@ -958,8 +976,10 @@
             <span class="schema-field"><span class="field-name">was_truncated</span><span class="field-type">bool</span></span>
             <span class="schema-field"><span class="field-name">drafted_email</span><span class="field-type">jsonb</span></span>
             <span class="schema-field"><span class="field-name">resume_upload_id</span><span class="field-type">uuid</span><span class="field-fk">FK</span></span>
+            <span class="schema-field"><span class="field-name">relevance_score</span><span class="field-type">int</span></span>
             <span class="schema-field"><span class="field-name">status</span><span class="field-type">enum</span></span>
             <span class="schema-field"><span class="field-name">sent_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">is_archived</span><span class="field-type">bool</span></span>
           </div>
         </div>
         <div class="schema-card">
@@ -1012,6 +1032,8 @@
             <span class="schema-field"><span class="field-name">is_used</span><span class="field-type">bool</span></span>
             <span class="schema-field"><span class="field-name">used_at</span><span class="field-type">timestamptz</span></span>
             <span class="schema-field"><span class="field-name">created_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">expires_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">revoked_at</span><span class="field-type">timestamptz</span></span>
           </div>
         </div>
       </div>
@@ -1025,8 +1047,9 @@
         <table>
           <thead><tr><th>Concern</th><th>Approach</th></tr></thead>
           <tbody>
-            <tr><td>Signup / Access</td><td>Invite-only. Admin generates single-use codes via the admin dashboard. User must provide a valid unused invite code at registration. Codes stored in <code>invite_codes</code> table; marked used atomically on account creation.</td></tr>
-            <tr><td>API Authentication</td><td>JWT (access token: 15 min TTL, refresh token: 7 days). Stored in <code>chrome.storage.local</code> in the extension; httpOnly cookie in the web app.</td></tr>
+            <tr><td>Signup / Access</td><td>Invite-only. Admin generates single-use codes via the admin dashboard, optionally with an expiry date. User must provide a valid unused invite code at registration — a code is redeemable only if unused, not manually revoked, and (no expiry or not yet expired). Codes stored in <code>invite_codes</code> table; marked used atomically on account creation, recording which user redeemed it. Admin can manually revoke any unused code at any time.</td></tr>
+            <tr><td>Access period</td><td>New accounts get a default 30-day access window (<code>users.access_expires_at</code>) after signup; existing accounts at the time this was introduced were grandfathered with no expiry. Admin can revoke a user's access entirely, restore it, or extend the window (date picker) and attach free-text notes from the admin dashboard. Enforced on every authenticated request, not just at login.</td></tr>
+            <tr><td>API Authentication</td><td>JWT (access token: 15 min TTL, refresh token: 7 days). Stored in <code>chrome.storage.local</code> in the extension; httpOnly cookie in the web app. Login distinguishes three failure reasons: incorrect email/password (generic message, deliberately vague), revoked access, and expired access period (the latter two return a specific, actionable message rather than a generic credentials error).</td></tr>
             <tr><td>Authorization</td><td>RBAC via FastAPI dependency. <code>require_admin</code> dependency blocks all admin routes from jobseeker tokens. Users can only access their own data (user_id check in service layer).</td></tr>
             <tr><td>Gmail tokens</td><td>Access and refresh tokens encrypted at rest (AES-256) using a server-side key. Never returned to client in plaintext. Revocable by user at any time.</td></tr>
             <tr><td>Passwords</td><td>bcrypt hashing with salt. Never stored or logged in plaintext.</td></tr>
@@ -1054,9 +1077,11 @@
         <h3 class="subsec-title">Admin Dashboard (Pranay only — <code>role: admin</code>)</h3>
         <ul class="il">
           <li>Total registered users + daily signups</li>
-          <li>Per-user: account email, registration date, total tokens used (input + output), total emails sent, last active date</li>
+          <li>Per-user: account email, registration date, total tokens used (input + output), total emails sent, last active date, access status (active/revoked), access expiry date, admin notes</li>
           <li>Platform-level token spend per day (aggregated, for LLM cost tracking)</li>
           <li>Agent breakdown: which agents are used most, average latency per agent</li>
+          <li>Invite codes: generate (with optional expiry), view who redeemed each one, manually revoke an unused code</li>
+          <li>Per-user access controls: revoke/restore access, extend the access window via a date picker, attach free-text notes</li>
           <li>No access to: profile content, email body, application details, resume text</li>
         </ul>
       </div>

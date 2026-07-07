@@ -110,6 +110,10 @@ select:focus {
   /* .btn is also used on react-router <Link>s (rendered as <a>), which get a browser-default
      underline that plain <button>s never had — nothing here was resetting it. */
   text-decoration: none;
+  /* Flex items don't wrap text onto two lines by shrinking width alone, but a crowded row of
+     several buttons (e.g. profile list actions) can still squeeze one enough to wrap its label.
+     nowrap keeps every button's label on one line — it overflows its own box before it wraps. */
+  white-space: nowrap;
 }
 .btn:disabled {
   opacity: 0.6;
@@ -159,6 +163,30 @@ select:focus {
   overflow-wrap: break-word;
 }
 
+/* Skill names within one category (profile view page) — categories themselves still stack one
+   below another, but the skill names inside each category wrap into columns instead of one per
+   line. Same "stop stacking single-column, wrap without overlapping" pattern as .field-grid. */
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 4px 16px;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.skill-grid > * {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* Truncate to a single line with an ellipsis instead of wrapping/overflowing — used for the
+   profile summary preview in the profiles list, which can be arbitrarily long free text. */
+.truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .muted {
   color: var(--text-secondary);
   font-size: 13.5px;
@@ -172,6 +200,44 @@ select:focus {
   border-radius: 100px;
   background: var(--accent-light);
   color: var(--accent);
+  white-space: nowrap;
+}
+
+.badge-warning {
+  background: #fff6e0;
+  color: #7a5b00;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.data-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table tbody tr:hover {
+  background: var(--neutral-bg);
+}
+
+.badge-success {
+  background: #e2f5e8;
+  color: #1a7a3c;
 }
 
 .topbar {

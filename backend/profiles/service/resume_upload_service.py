@@ -1,9 +1,12 @@
+import logging
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_usage.models import AgentUsageLog
+from agent_usage.schemas import AgentUsageInfo
 from agents.resume_parser.agent import parse_resume
 from agents.resume_parser.pdf_extractor import ResumeTextExtractionError, extract_resume_text
 from agents.resume_parser.schemas import ResumeUploadResult
@@ -12,6 +15,8 @@ from core.storage import upload_pdf
 from profiles.models import ResumeUpload, UserProfile
 from profiles.schemas import ResumeUploadResponse
 from profiles.service.profile_service import ProfileNotFoundError
+
+logger = logging.getLogger(__name__)
 
 MAX_RESUME_SIZE_BYTES = 5 * 1024 * 1024
 
@@ -41,6 +46,7 @@ async def _persist_resume_record(
     original_filename: str,
     raw_text: str,
     parsed_at: datetime,
+    parsed_usage: AgentUsageInfo,
 ) -> ResumeUpload:
     """Deactivate the previous active resume (if any) and insert the new one, atomically. Split out
     from upload_and_parse_resume so only this DB-only step is retried on a CockroachDB serialization
@@ -62,6 +68,16 @@ async def _persist_resume_record(
         parsed_at=parsed_at,
     )
     db.add(record)
+    db.add(
+        AgentUsageLog(
+            user_id=user_id,
+            agent_name="resume_parser",
+            model_used=parsed_usage.model_used,
+            input_tokens=parsed_usage.input_tokens,
+            output_tokens=parsed_usage.output_tokens,
+            latency_ms=parsed_usage.latency_ms,
+        )
+    )
     await db.commit()
     await db.refresh(record)
     return record
@@ -87,8 +103,9 @@ async def upload_and_parse_resume(
         raise InvalidResumeFileError(str(exc)) from exc
 
     try:
-        parsed = await parse_resume(resume_text)
+        parsed, parsed_usage = await parse_resume(resume_text)
     except Exception as exc:
+        logger.exception("Resume Parser agent failed for profile %s", profile_id)
         raise ResumeParsingError("Resume Parser agent failed to process this resume.") from exc
 
     upload_id = uuid.uuid4()
@@ -106,6 +123,7 @@ async def upload_and_parse_resume(
         original_filename,
         resume_text,
         datetime.now(timezone.utc),
+        parsed_usage,
     )
 
     return ResumeUploadResult(resume=ResumeUploadResponse.model_validate(record), parsed=parsed)

@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import * as profilesApi from "../api/profiles";
+import * as resumesApi from "../api/resumes";
 import { ApiError } from "../api/client";
-import { emptyProfileDraft, type ProfileWriteRequest } from "../api/types";
+import {
+  emptyProfileDraft,
+  type ProfileWriteRequest,
+  type ResumeParsedData,
+  type ResumeUploadResponse,
+} from "../api/types";
 import { AchievementsSection } from "../components/AchievementsSection";
 import { CertificationsSection } from "../components/CertificationsSection";
 import { EducationSection } from "../components/EducationSection";
@@ -10,7 +16,39 @@ import { ExperienceSection } from "../components/ExperienceSection";
 import { LanguagesSection } from "../components/LanguagesSection";
 import { PersonalInfoSection } from "../components/PersonalInfoSection";
 import { ProjectsSection } from "../components/ProjectsSection";
+import { ResumeUploadSection } from "../components/ResumeUploadSection";
 import { SkillsSection } from "../components/SkillsSection";
+
+// Only overwrite a draft field with a parsed one when the parser actually found something —
+// never clobber something the user already typed with a blank/empty value from the parser.
+function stripEmpty<T extends object>(obj: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === null || value === undefined || value === "") continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    (out as Record<string, unknown>)[key] = value;
+  }
+  return out;
+}
+
+// The Resume Parser agent (A3) never returns target_job_title/is_default — those aren't inferable
+// from a resume — so this only touches the fields it can produce. List-type sections are replaced
+// wholesale rather than appended to, since re-uploading a resume is a "start over from this file"
+// action, not a merge of two resumes.
+function mergeParsedIntoDraft(draft: ProfileWriteRequest, parsed: ResumeParsedData): ProfileWriteRequest {
+  return {
+    ...draft,
+    professional_summary: parsed.professional_summary || draft.professional_summary,
+    personal_info: { ...draft.personal_info, ...stripEmpty(parsed.personal_info) },
+    skills: parsed.skills.length > 0 ? parsed.skills : draft.skills,
+    experiences: parsed.experiences.length > 0 ? parsed.experiences : draft.experiences,
+    projects: parsed.projects.length > 0 ? parsed.projects : draft.projects,
+    education: parsed.education.length > 0 ? parsed.education : draft.education,
+    certifications: parsed.certifications.length > 0 ? parsed.certifications : draft.certifications,
+    achievements: parsed.achievements.length > 0 ? parsed.achievements : draft.achievements,
+    languages: parsed.languages.length > 0 ? parsed.languages : draft.languages,
+  };
+}
 
 export function ProfileEditorPage() {
   const { id } = useParams<{ id: string }>();
@@ -20,6 +58,11 @@ export function ProfileEditorPage() {
   const [draft, setDraft] = useState<ProfileWriteRequest | null>(isNew ? emptyProfileDraft() : null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // A resume can only be uploaded against a profile row that already exists (backend FK). For a
+  // brand-new profile this stays null until the user's first upload silently creates the row —
+  // from then on, uploads and the final save both target this id instead of POSTing again.
+  const [profileId, setProfileId] = useState<string | null>(isNew ? null : id ?? null);
+  const [activeResume, setActiveResume] = useState<ResumeUploadResponse | null>(null);
 
   useEffect(() => {
     if (isNew || !id) return;
@@ -27,17 +70,37 @@ export function ProfileEditorPage() {
       .getProfile(id)
       .then(setDraft)
       .catch(() => setError("Could not load this profile."));
+    resumesApi
+      .getActiveResume(id)
+      .then(setActiveResume)
+      .catch(() => setActiveResume(null)); // 404 = no resume uploaded yet, not an error
   }, [id, isNew]);
+
+  async function handleUploadResume(file: File) {
+    if (!draft) return;
+    let targetId = profileId;
+    if (!targetId) {
+      if (!draft.target_job_title.trim()) {
+        throw new Error("Enter a target job title before uploading a resume.");
+      }
+      const created = await profilesApi.createProfile(draft);
+      targetId = created.id;
+      setProfileId(created.id);
+    }
+    const result = await resumesApi.uploadResume(targetId, file);
+    setActiveResume(result.resume);
+    setDraft((prev) => (prev ? mergeParsedIntoDraft(prev, result.parsed) : prev));
+  }
 
   async function handleSubmit() {
     if (!draft) return;
     setSaving(true);
     setError(null);
     try {
-      if (isNew) {
+      if (profileId) {
+        await profilesApi.updateProfile(profileId, draft);
+      } else {
         await profilesApi.createProfile(draft);
-      } else if (id) {
-        await profilesApi.updateProfile(id, draft);
       }
       navigate("/profiles");
     } catch (err) {
@@ -101,6 +164,13 @@ export function ProfileEditorPage() {
           />
         </div>
       </div>
+
+      <ResumeUploadSection
+        existingResume={activeResume}
+        canUpload={!!profileId || draft.target_job_title.trim().length > 0}
+        disabledHint="Enter a target job title above to enable resume upload."
+        onUpload={handleUploadResume}
+      />
 
       <h3 className="section-title">Personal information</h3>
       <PersonalInfoSection value={draft.personal_info} onChange={(personal_info) => setDraft({ ...draft, personal_info })} />

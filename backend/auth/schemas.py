@@ -35,6 +35,11 @@ class UserResponse(BaseModel):
     role: RoleEnum
     is_active: bool
     created_at: datetime
+    last_login_at: datetime | None
+
+
+class CreateInviteCodeRequest(BaseModel):
+    expires_at: datetime | None = None
 
 
 class InviteCodeResponse(BaseModel):
@@ -45,3 +50,6 @@ class InviteCodeResponse(BaseModel):
     is_used: bool
     used_at: datetime | None
     created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    used_by_email: str | None = None

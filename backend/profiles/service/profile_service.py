@@ -1,6 +1,7 @@
+import json
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import JSON, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,11 +16,105 @@ from profiles.models import (
     ProfileSkill,
     UserProfile,
 )
-from profiles.schemas import ProfileWriteRequest
+from profiles.schemas import ProfileResponse, ProfileWriteRequest
 
 
 class ProfileNotFoundError(Exception):
     pass
+
+
+# Single-round-trip replacement for the 7-selectinload read _get_owned does — see
+# docs/BUILD_PLAN.md's N+1 backlog note. Each child collection is built inline via a correlated
+# json_agg subquery (experiences nests a further one for experience_projects) instead of one
+# sequential round trip per relationship. First raw-SQL query in this codebase — no existing
+# precedent to follow, so this stays deliberately self-contained in one function.
+_PROFILE_RESPONSE_SQL = text(
+    """
+    SELECT
+        up.id, up.user_id, up.target_job_title, up.is_default, up.professional_summary,
+        up.personal_info, up.created_at, up.updated_at,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, category, skill_name, display_order
+               FROM profile_skills WHERE profile_id = up.id) t
+        ) AS skills,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (
+            SELECT pe.id, pe.job_title, pe.company_name, pe.employment_type, pe.location,
+                   pe.start_date, pe.end_date, pe.currently_working_here, pe.responsibilities,
+                   pe.display_order,
+                   (SELECT COALESCE(json_agg(row_to_json(pt) ORDER BY pt.display_order), '[]'::json)
+                    FROM (SELECT id, project_name, details, display_order
+                          FROM experience_projects WHERE experience_id = pe.id) pt
+                   ) AS projects
+            FROM profile_experiences pe WHERE pe.profile_id = up.id
+         ) t
+        ) AS experiences,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, project_name, details, demo_url, github_url, display_order
+               FROM profile_projects WHERE profile_id = up.id) t
+        ) AS projects,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, degree, field_of_study, minor, institution_name, university_board,
+                      location, start_date, end_date, graduation_year, gpa, honors, display_order
+               FROM profile_education WHERE profile_id = up.id) t
+        ) AS education,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, certification_name, issuing_organization, issue_date, expiry_date,
+                      credential_id, credential_url, display_order
+               FROM profile_certifications WHERE profile_id = up.id) t
+        ) AS certifications,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, achievement_title, organization, date_achieved, description, display_order
+               FROM profile_achievements WHERE profile_id = up.id) t
+        ) AS achievements,
+        (SELECT COALESCE(json_agg(row_to_json(t) ORDER BY t.display_order), '[]'::json)
+         FROM (SELECT id, language, proficiency, display_order
+               FROM profile_languages WHERE profile_id = up.id) t
+        ) AS languages
+    FROM user_profiles up
+    WHERE up.id = :profile_id AND up.user_id = :user_id
+    """
+).columns(
+    personal_info=JSON,
+    skills=JSON,
+    experiences=JSON,
+    projects=JSON,
+    education=JSON,
+    certifications=JSON,
+    achievements=JSON,
+    languages=JSON,
+)
+
+_JSON_FIELDS = (
+    "personal_info",
+    "skills",
+    "experiences",
+    "projects",
+    "education",
+    "certifications",
+    "achievements",
+    "languages",
+)
+
+
+def _maybe_json_loads(value):
+    # Defensive: whether the asyncpg driver or SQLAlchemy's JSON type-hint already deserialized
+    # this column or not, handle both — there's no existing raw-SQL precedent in this codebase to
+    # confirm which one happens in practice, so don't assume either way.
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def _fetch_profile_response(
+    db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID
+) -> ProfileResponse | None:
+    result = await db.execute(_PROFILE_RESPONSE_SQL, {"profile_id": profile_id, "user_id": user_id})
+    row = result.mappings().first()
+    if row is None:
+        return None
+    data = dict(row)
+    for field in _JSON_FIELDS:
+        data[field] = _maybe_json_loads(data[field])
+    return ProfileResponse.model_validate(data)
 
 
 def _load_options():
@@ -136,7 +231,7 @@ def _apply_children(profile: UserProfile, payload: ProfileWriteRequest) -> None:
     ]
 
 
-async def create_profile(db: AsyncSession, user_id: uuid.UUID, payload: ProfileWriteRequest) -> UserProfile:
+async def create_profile(db: AsyncSession, user_id: uuid.UUID, payload: ProfileWriteRequest) -> ProfileResponse:
     existing_count = await db.scalar(
         select(UserProfile.id).where(UserProfile.user_id == user_id).limit(1)
     )
@@ -158,7 +253,9 @@ async def create_profile(db: AsyncSession, user_id: uuid.UUID, payload: ProfileW
 
     db.add(profile)
     await db.commit()
-    return await _get_owned(db, user_id, profile.id)
+    response = await _fetch_profile_response(db, user_id, profile.id)
+    assert response is not None  # just created in this same transaction
+    return response
 
 
 async def list_profiles(db: AsyncSession, user_id: uuid.UUID) -> list[UserProfile]:
@@ -172,13 +269,31 @@ async def list_profiles(db: AsyncSession, user_id: uuid.UUID) -> list[UserProfil
     return list(result.all())
 
 
-async def get_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID) -> UserProfile:
-    return await _get_owned(db, user_id, profile_id)
+async def get_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID) -> ProfileResponse:
+    response = await _fetch_profile_response(db, user_id, profile_id)
+    if response is None:
+        raise ProfileNotFoundError(str(profile_id))
+    return response
+
+
+async def get_default_profile_id(db: AsyncSession, user_id: uuid.UUID) -> uuid.UUID | None:
+    """Cheap single-column lookup for Feature 9's auto-scoring at extraction time — the user's
+    is_default profile, or their earliest-created one if none is marked default (mirrors the same
+    fallback the extension's DraftEmailSection already applies client-side). Returns None for a
+    user with zero profiles, which callers treat as "skip scoring", not an error."""
+    default_id = await db.scalar(
+        select(UserProfile.id).where(UserProfile.user_id == user_id, UserProfile.is_default.is_(True))
+    )
+    if default_id is not None:
+        return default_id
+    return await db.scalar(
+        select(UserProfile.id).where(UserProfile.user_id == user_id).order_by(UserProfile.created_at).limit(1)
+    )
 
 
 async def update_profile(
     db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID, payload: ProfileWriteRequest
-) -> UserProfile:
+) -> ProfileResponse:
     profile = await _get_owned(db, user_id, profile_id)
 
     # A profile that is currently the default cannot be silently demoted by an update payload —
@@ -195,7 +310,9 @@ async def update_profile(
     _apply_children(profile, payload)
 
     await db.commit()
-    return await _get_owned(db, user_id, profile_id)
+    response = await _fetch_profile_response(db, user_id, profile_id)
+    assert response is not None  # just committed successfully in this same transaction
+    return response
 
 
 async def delete_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID) -> None:
@@ -218,18 +335,20 @@ async def delete_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.
     await db.commit()
 
 
-async def set_default_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID) -> UserProfile:
+async def set_default_profile(db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID) -> ProfileResponse:
     profile = await _get_owned(db, user_id, profile_id)
     if not profile.is_default:
         await _demote_other_defaults(db, user_id, keep_profile_id=profile.id)
         profile.is_default = True
         await db.commit()
-    return await _get_owned(db, user_id, profile_id)
+    response = await _fetch_profile_response(db, user_id, profile_id)
+    assert response is not None  # just verified ownership above via _get_owned
+    return response
 
 
 async def clone_profile(
     db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID, new_target_job_title: str
-) -> UserProfile:
+) -> ProfileResponse:
     source = await _get_owned(db, user_id, profile_id)
 
     clone = UserProfile(
@@ -314,4 +433,6 @@ async def clone_profile(
 
     db.add(clone)
     await db.commit()
-    return await _get_owned(db, user_id, clone.id)
+    response = await _fetch_profile_response(db, user_id, clone.id)
+    assert response is not None  # just created in this same transaction
+    return response

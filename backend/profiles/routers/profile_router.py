@@ -28,10 +28,9 @@ _CONFLICT_DETAIL = "This profile was updated by another request at the same time
 @router.post("", response_model=ProfileResponse, status_code=status.HTTP_201_CREATED)
 async def create_profile(payload: ProfileWriteRequest, user: CurrentUser, db: DbSession) -> ProfileResponse:
     try:
-        profile = await with_serialization_retry(db, profile_service.create_profile, db, user.id, payload)
+        return await with_serialization_retry(db, profile_service.create_profile, db, user.id, payload)
     except SerializationConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_CONFLICT_DETAIL) from exc
-    return ProfileResponse.model_validate(profile)
 
 
 @router.get("", response_model=list[ProfileSummaryResponse])
@@ -43,10 +42,9 @@ async def list_profiles(user: CurrentUser, db: DbSession) -> list[ProfileSummary
 @router.get("/{profile_id}", response_model=ProfileResponse)
 async def get_profile(profile_id: uuid.UUID, user: CurrentUser, db: DbSession) -> ProfileResponse:
     try:
-        profile = await profile_service.get_profile(db, user.id, profile_id)
+        return await profile_service.get_profile(db, user.id, profile_id)
     except ProfileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found") from exc
-    return ProfileResponse.model_validate(profile)
 
 
 @router.put("/{profile_id}", response_model=ProfileResponse)
@@ -54,12 +52,11 @@ async def update_profile(
     profile_id: uuid.UUID, payload: ProfileWriteRequest, user: CurrentUser, db: DbSession
 ) -> ProfileResponse:
     try:
-        profile = await with_serialization_retry(db, profile_service.update_profile, db, user.id, profile_id, payload)
+        return await with_serialization_retry(db, profile_service.update_profile, db, user.id, profile_id, payload)
     except ProfileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found") from exc
     except SerializationConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_CONFLICT_DETAIL) from exc
-    return ProfileResponse.model_validate(profile)
 
 
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -75,12 +72,11 @@ async def delete_profile(profile_id: uuid.UUID, user: CurrentUser, db: DbSession
 @router.post("/{profile_id}/set-default", response_model=ProfileResponse)
 async def set_default_profile(profile_id: uuid.UUID, user: CurrentUser, db: DbSession) -> ProfileResponse:
     try:
-        profile = await with_serialization_retry(db, profile_service.set_default_profile, db, user.id, profile_id)
+        return await with_serialization_retry(db, profile_service.set_default_profile, db, user.id, profile_id)
     except ProfileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found") from exc
     except SerializationConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_CONFLICT_DETAIL) from exc
-    return ProfileResponse.model_validate(profile)
 
 
 @router.post("/{profile_id}/clone", response_model=ProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -88,14 +84,13 @@ async def clone_profile(
     profile_id: uuid.UUID, payload: CloneProfileRequest, user: CurrentUser, db: DbSession
 ) -> ProfileResponse:
     try:
-        clone = await with_serialization_retry(
+        return await with_serialization_retry(
             db, profile_service.clone_profile, db, user.id, profile_id, payload.target_job_title
         )
     except ProfileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found") from exc
     except SerializationConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_CONFLICT_DETAIL) from exc
-    return ProfileResponse.model_validate(clone)
 
 
 @router.post("/{profile_id}/resume", response_model=ResumeUploadResult, status_code=status.HTTP_201_CREATED)
