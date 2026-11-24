@@ -411,7 +411,7 @@ async def send_application_email(db: AsyncSession, user_id: uuid.UUID, applicati
     filename = "_".join(_sanitize_filename_part(part) for part in name_parts if part) + "_Resume.pdf"
 
     attachment_bytes = await download_pdf(resume.file_path)
-    gmail_message_id = await send_message(
+    gmail_message_id, gmail_thread_id = await send_message(
         db,
         user_id,
         to=application.parsed_email,
@@ -422,11 +422,18 @@ async def send_application_email(db: AsyncSession, user_id: uuid.UUID, applicati
     )
     logger.info("Sent application %s via Gmail (message id %s)", application_id, gmail_message_id)
 
-    return await with_serialization_retry(db, _persist_sent, db, user_id, application_id, resume.id)
+    return await with_serialization_retry(
+        db, _persist_sent, db, user_id, application_id, resume.id, gmail_message_id, gmail_thread_id
+    )
 
 
 async def _persist_sent(
-    db: AsyncSession, user_id: uuid.UUID, application_id: uuid.UUID, resume_upload_id: uuid.UUID
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    application_id: uuid.UUID,
+    resume_upload_id: uuid.UUID,
+    gmail_message_id: str,
+    gmail_thread_id: str,
 ) -> Application:
     # Same "DB-only step gets the retry, the external call doesn't" split as _persist_draft —
     # re-fetches fresh state on each attempt rather than resending the email on a serialization
@@ -436,6 +443,11 @@ async def _persist_sent(
     application.resume_upload_id = resume_upload_id
     application.sent_at = datetime.now(timezone.utc)
     application.status = ApplicationStatusEnum.SENT
+    # Feature 13 (Gmail Follow-Up Manager) matches gmail_sent_messages rows back to this
+    # application via gmail_message_id — previously fetched from the Gmail API and logged, then
+    # discarded, on every send.
+    application.gmail_message_id = gmail_message_id
+    application.gmail_thread_id = gmail_thread_id
     await db.commit()
     await db.refresh(application)
     return application

@@ -2,30 +2,41 @@ import { API_BASE_URL, WEB_APP_URL } from "../shared/config";
 import { clearAuthStorage, getAuthStorage, setAuthStorage } from "../shared/storage";
 import type {
   ApplicationDetail,
+  ArchiveMailRowResponse,
   AuthStateResponse,
   AuthUser,
   BackgroundToContentMessage,
   CheckDuplicateResponse,
+  ClassifyFieldsMatch,
+  ClassifyFieldsResponse,
   ContentToBackgroundMessage,
   DeleteApplicationResponse,
   DraftEmailResponse,
+  DraftFollowupResponse,
   ExtractPostResponse,
   GetMetricsResponse,
+  GetProfileDetailResponse,
   GetProfilesResponse,
+  GetSentMailPageResponse,
   GmailConnectResponse,
   GmailDisconnectResponse,
   GmailStatusResponse,
   ListApplicationsResponse,
   LoginResponse,
   LogoutResponse,
+  MailboxSummary,
   MarkArchivedResponse,
   MarkRepliedResponse,
   MarkSentResponse,
   MarkUnarchivedResponse,
   OpenWebAppResponse,
   PostExtractionResult,
+  ProfileDetail,
   ProfileSummary,
   SendEmailResponse,
+  SendFollowupResponse,
+  SentMailRow,
+  UnarchiveMailRowResponse,
   UpdateApplicationResponse,
   UserMetrics,
 } from "../shared/types";
@@ -126,6 +137,31 @@ async function getProfiles(): Promise<GetProfilesResponse> {
     return { ok: false, error: detail };
   }
   return { ok: true, profiles: body as ProfileSummary[] };
+}
+
+async function getProfileDetail(
+  message: ContentToBackgroundMessage & { type: "GET_PROFILE_DETAIL" },
+): Promise<GetProfileDetailResponse> {
+  const { status, body } = await authorizedFetch(`/profiles/${message.profileId}`);
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not load that profile";
+    return { ok: false, error: detail };
+  }
+  return { ok: true, profile: body as ProfileDetail };
+}
+
+async function classifyFields(
+  message: ContentToBackgroundMessage & { type: "CLASSIFY_FIELDS" },
+): Promise<ClassifyFieldsResponse> {
+  const { status, body } = await authorizedFetch("/profiles/classify-fields", {
+    method: "POST",
+    body: JSON.stringify({ fields: message.fields }),
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not classify these fields";
+    return { ok: false, error: detail };
+  }
+  return { ok: true, matches: (body as { matches: ClassifyFieldsMatch[] }).matches };
 }
 
 async function draftEmail(message: ContentToBackgroundMessage & { type: "DRAFT_EMAIL" }): Promise<DraftEmailResponse> {
@@ -288,6 +324,80 @@ async function deleteApplication(
   return { ok: true };
 }
 
+async function getSentMailPage(
+  message: ContentToBackgroundMessage & { type: "GET_SENT_MAIL_PAGE" },
+): Promise<GetSentMailPageResponse> {
+  const { status, body } = await authorizedFetch("/mailbox/sent", {
+    method: "POST",
+    body: JSON.stringify({
+      page_size: message.pageSize,
+      page_token: message.pageToken ?? null,
+      date_from: message.dateFrom ?? null,
+      date_to: message.dateTo ?? null,
+    }),
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not load your sent mail";
+    return { ok: false, error: detail };
+  }
+  const result = body as { rows: SentMailRow[]; next_page_token: string | null; summary: MailboxSummary };
+  return { ok: true, rows: result.rows, nextPageToken: result.next_page_token, summary: result.summary };
+}
+
+async function draftFollowup(
+  message: ContentToBackgroundMessage & { type: "DRAFT_FOLLOWUP" },
+): Promise<DraftFollowupResponse> {
+  const { status, body } = await authorizedFetch(`/mailbox/${message.gmailSentMessageId}/followup/draft`, {
+    method: "POST",
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not draft a follow-up for this email";
+    return { ok: false, error: detail };
+  }
+  const result = body as { subject: string; body: string; grounding: "full" | "subject_only" };
+  return { ok: true, subject: result.subject, body: result.body, grounding: result.grounding };
+}
+
+async function sendFollowup(
+  message: ContentToBackgroundMessage & { type: "SEND_FOLLOWUP" },
+): Promise<SendFollowupResponse> {
+  const { status, body } = await authorizedFetch(`/mailbox/${message.gmailSentMessageId}/followup/send`, {
+    method: "POST",
+    body: JSON.stringify({ subject: message.subject, body: message.body }),
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not send this follow-up";
+    return { ok: false, error: detail };
+  }
+  return { ok: true, row: body as SentMailRow };
+}
+
+async function archiveMailRow(
+  message: ContentToBackgroundMessage & { type: "ARCHIVE_MAIL_ROW" },
+): Promise<ArchiveMailRowResponse> {
+  const { status, body } = await authorizedFetch(`/mailbox/${message.gmailSentMessageId}/archive`, {
+    method: "POST",
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not archive this row";
+    return { ok: false, error: detail };
+  }
+  return { ok: true, row: body as SentMailRow };
+}
+
+async function unarchiveMailRow(
+  message: ContentToBackgroundMessage & { type: "UNARCHIVE_MAIL_ROW" },
+): Promise<UnarchiveMailRowResponse> {
+  const { status, body } = await authorizedFetch(`/mailbox/${message.gmailSentMessageId}/unarchive`, {
+    method: "POST",
+  });
+  if (status !== 200) {
+    const detail = (body as { detail?: string } | undefined)?.detail ?? "Could not unarchive this row";
+    return { ok: false, error: detail };
+  }
+  return { ok: true, row: body as SentMailRow };
+}
+
 async function getAuthState(): Promise<AuthStateResponse> {
   const { access_token, refresh_token } = await getAuthStorage();
   if (!access_token) return { authenticated: false };
@@ -347,6 +457,10 @@ function handleMessage(message: ContentToBackgroundMessage) {
       return updateApplication(message);
     case "GET_PROFILES":
       return getProfiles();
+    case "GET_PROFILE_DETAIL":
+      return getProfileDetail(message);
+    case "CLASSIFY_FIELDS":
+      return classifyFields(message);
     case "DRAFT_EMAIL":
       return draftEmail(message);
     case "GMAIL_STATUS":
@@ -375,11 +489,29 @@ function handleMessage(message: ContentToBackgroundMessage) {
       return checkDuplicateRecipient(message);
     case "DELETE_APPLICATION":
       return deleteApplication(message);
+    case "GET_SENT_MAIL_PAGE":
+      return getSentMailPage(message);
+    case "DRAFT_FOLLOWUP":
+      return draftFollowup(message);
+    case "SEND_FOLLOWUP":
+      return sendFollowup(message);
+    case "ARCHIVE_MAIL_ROW":
+      return archiveMailRow(message);
+    case "UNARCHIVE_MAIL_ROW":
+      return unarchiveMailRow(message);
   }
 }
 
 chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, _sender, sendResponse) => {
-  handleMessage(message).then(sendResponse);
+  handleMessage(message)
+    .then(sendResponse)
+    .catch((error) => {
+      // Without this, a thrown error (e.g. the backend being unreachable) leaves sendResponse
+      // uncalled and the content script's chrome.runtime.sendMessage promise pending forever —
+      // the panel gets stuck showing "Loading…" with no way out short of reopening it.
+      const detail = error instanceof Error ? error.message : "Something went wrong talking to the backend";
+      sendResponse({ ok: false, error: detail, authenticated: false });
+    });
   return true; // keep the message channel open for the async response above
 });
 
@@ -387,9 +519,21 @@ async function toggleActiveTabPanel(): Promise<void> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return;
   const message: BackgroundToContentMessage = { type: "TOGGLE_PANEL" };
-  // Rejects if the content script isn't present on this tab (e.g. not a linkedin.com page) —
-  // nothing to relay to in that case, so swallow it.
-  chrome.tabs.sendMessage(tab.id, message).catch(() => undefined);
+  try {
+    await chrome.tabs.sendMessage(tab.id, message);
+  } catch {
+    // No content script listening on this tab yet — either it's not linkedin.com (where the
+    // static content_scripts entry doesn't apply) or a fresh navigation wiped a prior on-demand
+    // injection. Inject the same bundle on demand: the command/action-click that got us here is
+    // itself the user gesture that makes `activeTab` grant temporary access to this one tab, which
+    // `scripting.executeScript` then uses — no persistent host_permissions needed for arbitrary sites.
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+      await chrome.tabs.sendMessage(tab.id, message);
+    } catch {
+      // Not injectable here (chrome://, the Web Store, etc.) — nothing to do.
+    }
+  }
 }
 
 chrome.commands.onCommand.addListener((command) => {

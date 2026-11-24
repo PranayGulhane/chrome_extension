@@ -1,7 +1,7 @@
 import logging
 import time
 
-from groq import BadRequestError, RateLimitError
+from groq import APIStatusError
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -52,18 +52,40 @@ def _run_llm(context: RelevanceScorerContext) -> tuple[RelevanceScorerOutput, Ag
     # Same multi-model fallback + method="json_schema" pattern as every other agent in this
     # codebase — see agents/resume_parser/agent.py / docs/PROGRESS.md's "Groq multi-model
     # fallback" log for why json_schema is the proven-safe default over function_calling.
-    last_error: BadRequestError | RateLimitError | OutputParserException | None = None
+    # Catches groq.APIStatusError (base class of BadRequestError/RateLimitError/NotFoundError/...)
+    # so a decommissioned model id, which returns 404, advances to the next model instead of
+    # escaping the loop — see agents/email_drafter/agent.py for the incident this came from.
+    # 400 was the tightest max_tokens of any agent here and this output is short, but gpt-oss burns
+    # reasoning tokens out of the same budget before emitting any JSON, so it was the likeliest of
+    # all of them to hit json_validate_failed. reasoning_effort="low" + a bigger cap covers both.
+    last_error: APIStatusError | OutputParserException | None = None
     models = settings.groq_relevance_scorer_models
     for attempt in range(1, _MAX_FALLBACK_ATTEMPTS + 1):
         model = models[min(attempt - 1, len(models) - 1)]
-        llm = ChatGroq(model=model, api_key=settings.groq_api_key, temperature=0.2, max_tokens=400)
+        llm = ChatGroq(
+            model=model,
+            api_key=settings.groq_api_key,
+            temperature=0.2,
+            # qwen3.6-27b needs a far larger budget than the gpt-oss models — it reasons heavily
+            # with no reasoning_effort control and 400s outright when truncated (measured: 1263
+            # output tokens even for this agent's tiny score+reason schema, failing at 1024).
+            max_tokens=4096 if "qwen" in model else 1024,
+            reasoning_effort="low" if "gpt-oss" in model else None,
+        )
         structured_llm = llm.with_structured_output(RelevanceScorerOutput, include_raw=True, method="json_schema")
         try:
             start = time.monotonic()
             result = structured_llm.invoke(messages)
             latency_ms = int((time.monotonic() - start) * 1000)
             parsed = result["parsed"]
-            assert isinstance(parsed, RelevanceScorerOutput)
+            # include_raw=True reports a schema-violating response as parsed=None +
+            # parsing_error rather than raising, so the bare assert this replaces escaped the
+            # retry loop as an uncaught AssertionError. See agents/resume_parser/agent.py.
+            if not isinstance(parsed, RelevanceScorerOutput):
+                err = result["parsing_error"]
+                if isinstance(err, OutputParserException):
+                    raise err
+                raise OutputParserException(f"no schema-valid output (parsing_error={err!r})")
             raw = result["raw"]
             usage = raw.usage_metadata or {}
             usage_info = AgentUsageInfo(
@@ -73,7 +95,7 @@ def _run_llm(context: RelevanceScorerContext) -> tuple[RelevanceScorerOutput, Ag
                 latency_ms=latency_ms,
             )
             return parsed, usage_info
-        except (BadRequestError, RateLimitError, OutputParserException) as exc:
+        except (APIStatusError, OutputParserException) as exc:
             logger.warning("Relevance Scorer attempt %d failed on model %s: %s", attempt, model, exc)
             last_error = exc
     assert last_error is not None

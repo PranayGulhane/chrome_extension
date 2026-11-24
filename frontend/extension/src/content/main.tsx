@@ -40,7 +40,13 @@ function ensureMounted(): void {
   mount();
 }
 
-mount();
+// ensureMounted() rather than a bare mount(): on-demand injection (activeTab + scripting, used for
+// any non-LinkedIn page) re-runs this entire script from scratch on every injection — each
+// execution is a fresh IIFE realm even though the DOM persists across them. Guarding against an
+// already-present host here makes a hypothetical repeat injection idempotent instead of merely
+// unlikely (in practice the background worker's try-sendMessage-first order means this rarely
+// re-runs once a tab already has it).
+ensureMounted();
 
 chrome.runtime.onMessage.addListener((message: BackgroundToContentMessage) => {
   if (message.type === "TOGGLE_PANEL") {

@@ -2,7 +2,7 @@ import logging
 import re
 import time
 
-from groq import BadRequestError, RateLimitError
+from groq import APIStatusError
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -67,23 +67,45 @@ def _run_llm(post_text: str, email_candidates: list[str]) -> tuple[JDParserOutpu
     # settings.groq_jd_parser_models (index 0 = today's original single default), not a blind
     # retry of the same model — this is what actually works around a per-model daily quota
     # exhaustion (Groq's rate limits are per model), unlike retrying the same one repeatedly.
-    # Catches BadRequestError/RateLimitError/OutputParserException broadly (no longer gated to the
-    # one specific "did not call a tool" message) since every attempt is already a fresh model —
-    # there's no reason to give up early just because this particular failure text doesn't match a
-    # known string. A genuine non-transient bug (bad API key, malformed request) will fail
-    # identically across all 4 models and still surface as the final raised error.
-    last_error: BadRequestError | RateLimitError | OutputParserException | None = None
+    # Catches groq.APIStatusError/OutputParserException broadly (no longer gated to the one
+    # specific "did not call a tool" message) since every attempt is already a fresh model — there's
+    # no reason to give up early just because this particular failure text doesn't match a known
+    # string. APIStatusError is the base class of every HTTP-status error the SDK raises
+    # (BadRequestError, RateLimitError, NotFoundError, ...); naming only BadRequest/RateLimit let a
+    # decommissioned model id's 404 escape the loop and crash the request before the remaining
+    # healthy models were tried. A genuine non-transient bug (bad API key, malformed request) will
+    # fail identically across all 4 models and still surface as the final raised error.
+    #
+    # reasoning_effort="low" for the gpt-oss models only (the sole reasoning models in this list —
+    # passing it to Llama/Qwen errors): their reasoning tokens are spent from the same max_tokens
+    # budget as the answer, so the old 1024 could be exhausted before the tool call was emitted.
+    last_error: APIStatusError | OutputParserException | None = None
     models = settings.groq_jd_parser_models
     for attempt in range(1, _MAX_FALLBACK_ATTEMPTS + 1):
         model = models[min(attempt - 1, len(models) - 1)]
-        llm = ChatGroq(model=model, api_key=settings.groq_api_key, temperature=0, max_tokens=1024)
+        llm = ChatGroq(
+            model=model,
+            api_key=settings.groq_api_key,
+            temperature=0,
+            max_tokens=2048,
+            reasoning_effort="low" if "gpt-oss" in model else None,
+        )
         structured_llm = llm.with_structured_output(JDParserOutput, include_raw=True)
         try:
             start = time.monotonic()
             result = structured_llm.invoke(messages)
             latency_ms = int((time.monotonic() - start) * 1000)
             parsed = result["parsed"]
-            assert isinstance(parsed, JDParserOutput)
+            # include_raw=True reports a schema-violating response as parsed=None +
+            # parsing_error rather than raising, so the bare assert this replaces escaped the
+            # retry loop as an uncaught AssertionError. Especially relevant here, the one agent
+            # still on function_calling: "model didn't call the tool" lands in exactly this
+            # branch. See agents/resume_parser/agent.py.
+            if not isinstance(parsed, JDParserOutput):
+                err = result["parsing_error"]
+                if isinstance(err, OutputParserException):
+                    raise err
+                raise OutputParserException(f"no schema-valid output (parsing_error={err!r})")
             raw = result["raw"]
             usage = raw.usage_metadata or {}
             usage_info = AgentUsageInfo(
@@ -93,7 +115,7 @@ def _run_llm(post_text: str, email_candidates: list[str]) -> tuple[JDParserOutpu
                 latency_ms=latency_ms,
             )
             return parsed, usage_info
-        except (BadRequestError, RateLimitError, OutputParserException) as exc:
+        except (APIStatusError, OutputParserException) as exc:
             logger.warning("JD Parser attempt %d failed on model %s: %s", attempt, model, exc)
             last_error = exc
     assert last_error is not None

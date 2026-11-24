@@ -3,7 +3,7 @@
   "name": "LinkedIn Job Outreach Assistant",
   "version": "0.1.0",
   "description": "AI-assisted cold outreach for LinkedIn hiring posts.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://www.linkedin.com/*",
     "http://127.0.0.1:8123/*"

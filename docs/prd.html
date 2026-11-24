@@ -268,8 +268,10 @@
         <li><a href="#f-agents">AI Agent Pipeline</a></li>
         <li><a href="#f-gmail">Gmail Integration</a></li>
         <li><a href="#f-tracker">Application Tracker</a></li>
+        <li><a href="#f-followup">Gmail Follow-Up Manager</a></li>
         <li><a href="#f-profile">User Profiles</a></li>
         <li><a href="#f-resume">Resume Parser</a></li>
+        <li><a href="#f-formfill">Form Autofill</a></li>
       </ul>
     </div>
     <div class="toc-section">
@@ -305,7 +307,7 @@
       <p class="doc-sub">A lightweight Chrome extension backed by a full FastAPI + CockroachDB platform. The extension sits on LinkedIn, lets users select hiring posts, and uses AI agents to draft and send personalized cold emails — all in under 60 seconds.</p>
       <div class="doc-meta">
         <div class="meta-field"><span class="meta-key">Author</span><span class="meta-val">Pranay Gulhane</span></div>
-        <div class="meta-field"><span class="meta-key">Last Updated</span><span class="meta-val">1 July 2026</span></div>
+        <div class="meta-field"><span class="meta-key">Last Updated</span><span class="meta-val">13 July 2026</span></div>
         <div class="meta-field"><span class="meta-key">Target Release</span><span class="meta-val">Q3 2026</span></div>
         <div class="meta-field"><span class="meta-key">Platform</span><span class="meta-val">Chrome MV3 + FastAPI</span></div>
         <div class="meta-field"><span class="meta-key">Roles</span><span class="meta-val">Admin · JobSeeker</span></div>
@@ -349,6 +351,7 @@
           <div class="goal-item"><span class="goal-id">G6</span><span class="goal-text"><strong>Rich user profiles</strong> with all personal, professional, education, and skill details — multiple profiles per user, each scoped to a target job title.</span></div>
           <div class="goal-item"><span class="goal-id">G7</span><span class="goal-text"><strong>Resume PDF parser</strong> to auto-populate a profile from an uploaded resume, with manual correction available.</span></div>
           <div class="goal-item"><span class="goal-id">G8</span><span class="goal-text"><strong>Admin metrics dashboard</strong> — per-user token consumption, applications sent, and usage data for billing without exposing private profile details.</span></div>
+          <div class="goal-item"><span class="goal-id">G9</span><span class="badge b-v2" style="margin-right:8px;">v2</span><span class="goal-text"><strong>Application form autofill</strong> — on any site's job application form the user opens, known fields (name, email, phone, current employer) are filled directly from the active profile, and open-ended/subjective questions ("describe a challenging project you worked on") are AI-drafted from profile and resume context. Always reviewable, never auto-submitted.</span></div>
         </div>
       </div>
       <div class="subsec">
@@ -509,7 +512,7 @@
     <!-- 08 AI Agent Pipeline -->
     <section class="section" id="f-agents">
       <div class="sec-head"><span class="sec-num">08</span><h2 class="sec-title">AI Agent Pipeline</h2></div>
-      <div class="prose"><p>Four agents power the backend. All LLM calls are logged to <code>agent_usage_logs</code> for per-user token accounting. Each agent lives in its own module under <code>backend/agents/</code>.</p></div>
+      <div class="prose"><p>Six agents power the backend. All LLM calls are logged to <code>agent_usage_logs</code> for per-user token accounting. Each agent lives in its own module under <code>backend/agents/</code>.</p></div>
       <div class="callout callout-warn">
         <p><strong>Dependency hygiene:</strong> Agent orchestration is built on <strong>LangGraph</strong> (open source, actively maintained) using its StateGraph / functional API with Pydantic v2 structured outputs for every agent's IO. Do not use LangChain's legacy <code>initialize_agent</code>, <code>LLMChain</code>, or <code>AgentExecutor</code> helpers — deprecated since LangChain 0.1/0.2 and limited to critical fixes only. Groq model IDs must be re-checked against <code>console.groq.com/docs/deprecations</code> before every release — Groq retired multiple models in 2026 (e.g. <code>llama-3.3-70b-versatile</code>, <code>llama-3.1-8b-instant</code>) with short notice, so model IDs should be a config value, not hardcoded in agent code.</p>
       </div>
@@ -550,6 +553,24 @@
             <span><span class="io-label io-out">OUT</span> score (0–100), reasoning (string)</span>
           </div>
         </div>
+        <div class="agent-card">
+          <div class="agent-card-top"><span class="agent-num">A5</span><span class="badge b-v2">v2</span></div>
+          <h4>Form Answer Drafter</h4>
+          <p style="font-size:12.5px;color:var(--text-secondary);line-height:1.5;">Drafts answers to open-ended application-form questions (e.g. "tell us about a difficult situation," "describe a project where you used RAG"), grounded only in profile/resume/JD context — never invents facts. Never auto-submitted. See <a href="#f-formfill">§13</a>.</p>
+          <div class="agent-io">
+            <span><span class="io-label io-in">IN</span> question_text, length_limit, user_profile, active_resume_context, job_context (if known)</span>
+            <span><span class="io-label io-out">OUT</span> answer (string, respecting any detected length limit)</span>
+          </div>
+        </div>
+        <div class="agent-card">
+          <div class="agent-card-top"><span class="agent-num">A6</span><span class="badge b-v2">v2</span></div>
+          <h4>Follow-Up Drafter</h4>
+          <p style="font-size:12.5px;color:var(--text-secondary);line-height:1.5;">Drafts a short reply-in-thread follow-up for a previously sent application email, grounded only in the original drafted email + job context — never re-invents facts already stated, never fabricates new ones. Tone shifts slightly by attempt number (gentle nudge on the 1st follow-up, more direct by the 2nd+). See <a href="#f-followup">§11</a>.</p>
+          <div class="agent-io">
+            <span><span class="io-label io-in">IN</span> original_subject, original_body, job_title, company, days_since_sent, follow_up_number</span>
+            <span><span class="io-label io-out">OUT</span> subject (string, defaults to "Re: " + original), body (string)</span>
+          </div>
+        </div>
       </div>
       <div class="callout callout-info">
         <p><strong>Token logging is mandatory</strong> on every agent call. Log: user_id, agent_name, model_used, input_tokens, output_tokens, latency_ms, timestamp. This powers both user-facing usage displays and admin billing metrics.</p>
@@ -567,7 +588,7 @@
             <div class="flow-bubble">1</div>
             <div class="flow-body">
               <h4>User connects Gmail</h4>
-              <p>From the Options page or first-time setup, user clicks "Connect Gmail". Backend initiates a Google OAuth2 PKCE authorization code flow with scope <code>https://www.googleapis.com/auth/gmail.send</code> only.</p>
+              <p>From the Options page or first-time setup, user clicks "Connect Gmail". Backend initiates a Google OAuth2 PKCE authorization code flow with scope <code>https://www.googleapis.com/auth/gmail.send</code>, plus <code>https://www.googleapis.com/auth/gmail.metadata</code> as of §11's Follow-Up Manager (headers/labels only — never message bodies; see §11's callout for why this is additive, not a relaxation of the original send-only posture).</p>
             </div>
           </div>
           <div class="flow-step">
@@ -595,7 +616,7 @@
         </div>
       </div>
       <div class="callout callout-warn">
-        <p><strong>Security note:</strong> Gmail scope must be limited to <code>gmail.send</code> only — not <code>gmail.readonly</code> or broader. Users can revoke access at any time from Google Account settings. A "Disconnect Gmail" option is available in the extension Options page.</p>
+        <p><strong>Security note:</strong> Gmail scope is limited to <code>gmail.send</code> + <code>gmail.metadata</code> — never <code>gmail.readonly</code> or broader (the metadata scope structurally cannot return message bodies; Google enforces this server-side, not just by convention). Users can revoke access at any time from Google Account settings. A "Disconnect Gmail" option is available in the extension Options page. <strong>Rollout note:</strong> this scope was widened for §11's Follow-Up Manager — every already-connected user must reconnect Gmail once to re-consent before follow-up features work for them; their existing send-only token keeps working for regular sending in the meantime.</p>
       </div>
     </section>
 
@@ -638,14 +659,96 @@
             <tr><td>Sent At</td><td>UTC timestamp of send event</td></tr>
             <tr><td>Created At</td><td>UTC timestamp of extraction</td></tr>
             <tr><td>Archived</td><td>Boolean, independent of <code>status</code> — can be set at any lifecycle stage. Hidden from the default tracker view; toggled via a "Show archived" checkbox.</td></tr>
+            <tr><td>Gmail Message ID</td><td>Set at send time from the Gmail API's response <code>id</code> field. Null for anything not sent via this platform's Send flow (e.g. <code>linkedin_dm</code>/<code>apply_via_link</code>/<code>reach_out_other</code> records, or older records sent before this field existed). §11's Sent Mail Table matches on this to flag a mailbox row as "Platform."</td></tr>
+            <tr><td>Gmail Thread ID</td><td>Set at send time from the Gmail API's response <code>threadId</code> field. Carried onto the matching <code>gmail_sent_messages</code> row (§11) once synced.</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- 11 User Profiles -->
+    <!-- 11 Gmail Follow-Up Manager -->
+    <section class="section" id="f-followup">
+      <div class="sec-head"><span class="sec-num">11</span><h2 class="sec-title">Gmail Follow-Up Manager</h2></div>
+      <div class="prose">
+        <p>A "Manage Gmail" button in the extension panel opens a dedicated view over the user's <strong>entire Sent mailbox</strong> — not just mail sent through this platform. Navigation is <strong>pagination, newest-first</strong> (page size 10/20/50/100, user-selectable), matching how Gmail's own search results are paged; an optional date-range filter narrows which messages are paged through, but is never required up front. Every message is flagged as <span class="badge b-req" style="font-size:10px;">Platform</span> (matched to an <code>applications</code> row via <code>gmail_message_id</code>, §10) or <span class="badge b-be" style="font-size:10px;">External</span> (sent from Gmail directly, or from before this platform was in use). Grounded follow-up drafting works best on Platform rows, since only those have the original email body on file in this platform's own DB — see the drafting flow below for how External rows are handled.</p>
+      </div>
+      <div class="callout callout-warn">
+        <p><strong>Why <code>gmail.metadata</code> and not <code>gmail.readonly</code>:</strong> paging the Sent mailbox, detecting whether a recipient replied, and finding the RFC <code>Message-ID</code> header needed to send an in-thread follow-up all require reading message/thread metadata — but never message bodies. Google's <code>gmail.metadata</code> scope structurally restricts every read call to headers + labels only (<code>format=METADATA</code>) and cannot return message content even if the backend tried — this is enforced by Google's API, not by this codebase's discipline alone. So even though this feature surveys the whole Sent folder (broader than the original per-thread-only design), <strong>no email body content — Platform or External — is ever read or stored</strong>; only headers (Subject, To, Date, Message-ID) leave Gmail. Still user-triggered only (opening "Manage Gmail" / paging / changing the date filter), never a background sync.</p>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Mailbox Summary</h3>
+        <div class="prose"><p>A metrics strip above the table, computed from what's actually been paged through so far in this session (plus the active date filter, if any) — <strong>not a whole-mailbox aggregate</strong>. Walking every page of a large mailbox just to compute an exact total would defeat the point of paginating in the first place, so this is a deliberate, visible trade-off: the panel labels these numbers "from what's loaded so far," and separately shows Gmail's own <code>resultSizeEstimate</code> (a free, approximate count returned by the same search call) as a headline "~N sent" figure so the summary is never presented as more exact than it is.</p></div>
+        <ul class="il">
+          <li><strong>~Total sent</strong> — Gmail's <code>resultSizeEstimate</code> for the active query (all Sent, or date-filtered), approximate</li>
+          <li><strong>Sent via platform</strong> — of the rows loaded so far, subset matched to an <code>applications</code> row, with a %-of-loaded</li>
+          <li><strong>Follow-ups sent</strong> — count of <code>mail_followups</code> rows among loaded rows</li>
+          <li><strong>Replies detected</strong> — of loaded rows, threads with at least one inbound message (sender ≠ the connected Gmail address), detected via metadata headers</li>
+          <li><strong>Response rate</strong> — replies detected ÷ loaded rows (shown overall, and broken out for the Platform subset separately since that's the number the user most likely cares about)</li>
+          <li><strong>Awaiting response</strong> — of loaded rows: sent, not archived, no reply detected yet</li>
+          <li><strong>Avg. days to first reply</strong> — averaged only over loaded threads with a detected reply</li>
+        </ul>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Sent Mail Table</h3>
+        <div class="prose"><p>One row per sent message on the current page. Sortable and filterable (source: Platform / External / both; reply status: awaiting / replied; recipient/subject text search; "include archived" toggle) — but <strong>filters apply only to the currently-loaded page</strong>, not across the whole mailbox, since Platform/reply-status flags are this platform's own derived data and can't be pushed into Gmail's search query the way the date filter can. A heavily filtered page can show fewer rows than the page size; the panel says so inline rather than making pagination feel broken. Changing the page size or the date filter resets back to page 1.</p></div>
+        <div class="tw">
+          <table>
+            <thead><tr><th>Column</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Source</td><td><span class="badge b-req" style="font-size:10px;">Platform</span> / <span class="badge b-be" style="font-size:10px;">External</span> badge. Platform rows also show poster/company from the linked application.</td></tr>
+              <tr><td>Recipient</td><td>The "To" header</td></tr>
+              <tr><td>Subject</td><td>The sent email's subject</td></tr>
+              <tr><td>Sent Date</td><td>The "Date" header (Platform rows: same value already in <code>applications.sent_at</code>)</td></tr>
+              <tr><td>Last Follow-Up Date</td><td><code>MAX(mail_followups.sent_at)</code> for this message; blank if none sent yet</td></tr>
+              <tr><td>Reply Status</td><td>Awaiting / Replied — from metadata-scope thread inspection, refreshed when the row is viewed or a follow-up is drafted</td></tr>
+              <tr><td>Actions</td><td>"Follow up" button (opens the draft editor below) and "Archive" (removes from this queue going forward)</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Drafting &amp; Sending a Follow-Up</h3>
+        <div class="flow-steps">
+          <div class="flow-step">
+            <div class="flow-bubble">1</div>
+            <div class="flow-body">
+              <h4>Reply check</h4>
+              <p>Before drafting, the backend inspects the thread via <code>gmail.metadata</code>. If a reply is already detected, the panel surfaces that instead of offering a follow-up draft — no point nudging a thread that already got a response.</p>
+              <span class="flow-note note-warn">Not a hard block — the user can still choose to draft and send if they want to (e.g. the "reply" was an auto-ack, or they want to reply to the reply).</span>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-bubble">2</div>
+            <div class="flow-body">
+              <h4>Draft via Follow-Up Drafter (A6)</h4>
+              <p><strong>Platform rows:</strong> grounded in the original <code>drafted_email</code>/<code>final_email_sent</code> content, job context from the linked application, and how many follow-ups have already gone out on this thread — same quality bar as the original Email Drafter draft (§08 A2). <strong>External rows:</strong> the backend never read that email's body (metadata scope), so the draft is grounded only in the Subject header and recipient — a shorter, deliberately generic nudge ("Following up on my email regarding {subject}…"). The panel labels External-row drafts as "based on subject only" so the user knows to check it over more carefully before sending.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-bubble">3</div>
+            <div class="flow-body">
+              <h4>Edit</h4>
+              <p>Subject and body are both editable before sending, exactly like the original draft flow. Nothing is ever sent without this review step.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-bubble">4</div>
+            <div class="flow-body">
+              <h4>Send in-thread</h4>
+              <p>Sent via Gmail with <code>threadId</code> set to the message's <code>gmail_thread_id</code> and <code>In-Reply-To</code>/<code>References</code> headers set to the thread's latest <code>Message-ID</code> (read via <code>gmail.metadata</code>) — Gmail groups it into the same conversation rather than a new, disconnected email. No resume re-attachment; follow-ups are plain-text replies. A new <code>mail_followups</code> row is written on success, for both Platform and External rows.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Archiving</h3>
+        <div class="prose"><p>"Archive" on a row sets <code>gmail_sent_messages.is_archived</code> and removes it from the default queue — the concrete answer to "so we don't follow up an infinite number of times." Works the same for Platform and External rows. This is independent of the application tracker's own <code>is_archived</code> (§10): a Platform row can be archived from follow-up suggestions while still showing normally in the tracker, and vice versa.</p></div>
+      </div>
+    </section>
+
+    <!-- 12 User Profiles -->
     <section class="section" id="f-profile">
-      <div class="sec-head"><span class="sec-num">11</span><h2 class="sec-title">User Profile Management</h2></div>
+      <div class="sec-head"><span class="sec-num">12</span><h2 class="sec-title">User Profile Management</h2></div>
       <div class="prose">
         <p>A user can have <strong>multiple saved profiles</strong>, each scoped to a specific <strong>target job title</strong> (e.g., "GenAI Engineer", "Data Engineer", "Software Engineer"). When drafting an email, the user selects which profile to use. Profiles can be created manually, populated from a resume upload, or cloned from an existing profile.</p>
       </div>
@@ -750,9 +853,9 @@
       </div>
     </section>
 
-    <!-- 12 Resume Parser -->
+    <!-- 13 Resume Parser -->
     <section class="section" id="f-resume">
-      <div class="sec-head"><span class="sec-num">12</span><h2 class="sec-title">Resume Management &amp; Parser</h2></div>
+      <div class="sec-head"><span class="sec-num">13</span><h2 class="sec-title">Resume Management &amp; Parser</h2></div>
       <div class="prose">
         <p>The resume PDF uploaded to a profile serves <strong>two purposes</strong>: (1) it is parsed by agent A3 to auto-populate the profile fields, and (2) it is the file <strong>attached to every email sent</strong> from that profile. Only the resume for the active profile is attached — never a resume from a different profile.</p>
       </div>
@@ -776,9 +879,39 @@
       </div>
     </section>
 
-    <!-- 13 Tech Stack -->
+    <!-- 13 Application Form Autofill -->
+    <section class="section" id="f-formfill">
+      <div class="sec-head"><span class="sec-num">14</span><h2 class="sec-title">Application Form Autofill</h2></div>
+      <div class="badge b-v2" style="margin-bottom:14px;">v2</div>
+      <div class="prose">
+        <p>Beyond LinkedIn post extraction, the extension can also fill in application forms directly — on any site the user has the panel open on (a company's own careers page, a Greenhouse/Lever-hosted apply page, etc.), not just LinkedIn. Full design detail lives in <code>docs/FORM_AUTOFILL_EXTENSION.md</code>; this section captures the resulting scope for build planning.</p>
+        <p>A form mixes two fundamentally different kinds of fields, handled as two separate steps rather than one:</p>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Step 1 — Known-Field Autofill</h3>
+        <ul class="il">
+          <li><strong>Deterministic fields</strong> (email, first/last name, phone, current employer, LinkedIn URL, work authorization) are filled directly from the active profile — no LLM call needed for most of them.</li>
+          <li><strong>Field resolution is layered, cheapest first:</strong> the standard HTML <code>autocomplete</code> attribute (when the site sets it correctly) &rarr; label-text fuzzy matching against a synonym dictionary keyed to the existing profile schema &rarr; a small batched LLM classifier call only for whatever fields are still unresolved.</li>
+          <li><strong>Writing values in</strong> uses the native input-element property setter plus a dispatched <code>input</code>/<code>change</code> event — required for React/Vue-controlled form fields, which ignore a plain <code>element.value =</code> assignment. Selects/radios match against the option's visible label text; a "Resume" file field is populated from the profile's already-stored active resume PDF via a synthetic <code>File</code>/<code>DataTransfer</code>.</li>
+          <li><strong>Every filled field is visually marked and left editable.</strong> The extension never clicks Submit or auto-advances a multi-step form — the user reviews and submits themselves.</li>
+        </ul>
+      </div>
+      <div class="subsec">
+        <h3 class="subsec-title">Step 2 — Subjective Question Drafting</h3>
+        <ul class="il">
+          <li><strong>Open-ended questions</strong> ("tell me about the most difficult situation you've faced in your career," "describe a project where you implemented RAG") are detected via field type (<code>textarea</code>/<code>contenteditable</code>, or a high-<code>maxlength</code> text input) and question-like label phrasing, and answered by a new agent, <strong>Form Answer Drafter (A5)</strong> — same LangGraph/structured-output/multi-model-fallback pattern as the Email Drafter, grounded only in the user's profile, active resume, and job context (parsed JD if a tracker record already exists, otherwise the visible page's job title/company). Any detected length limit (<code>maxlength</code> or visible "N words max" text) is passed to the agent and respected.</li>
+          <li><strong>Answers are reused across applications</strong> via a new <code>form_answers</code> table (keyed by normalized question text + profile) — a recurring behavioral question gets the same, previously user-edited answer rather than a fresh, possibly inconsistent generation every time. An explicit "Regenerate" action produces a new draft when wanted.</li>
+          <li><strong>Always inserted as an editable suggestion, never submit-ready</strong> — prose has more room to be subtly wrong than a structured field, so this step carries a higher review bar than Step 1.</li>
+        </ul>
+      </div>
+      <div class="callout callout-warn">
+        <p><strong>Permissions and ToS posture:</strong> this feature only ever acts on a page the user is already viewing and never fetches other sites in the background — functionally the same category as a password manager's autofill, with direct commercial precedent (Simplify Jobs, Teal, Careerflow, LazyApply). It does not need a broadened <code>&lt;all_urls&gt;</code> content-script grant by default — either a user-maintained per-site allowlist (Options page) or Chrome's <code>activeTab</code> permission (grants access only to the current tab, only after the user explicitly triggers it) keeps the permission scope no bigger than necessary; this choice must be made explicitly before implementation (see <code>docs/FORM_AUTOFILL_EXTENSION.md</code> §5). If a CAPTCHA or bot-verification challenge appears on a form, the extension stops and lets the user solve it manually — it never attempts to detect, solve, or route around one. There is no "submit N applications automatically" mode, and none should be added — the human clicks Submit, always.</p>
+      </div>
+    </section>
+
+    <!-- 14 Tech Stack -->
     <section class="section" id="tech-stack">
-      <div class="sec-head"><span class="sec-num">13</span><h2 class="sec-title">Tech Stack</h2></div>
+      <div class="sec-head"><span class="sec-num">15</span><h2 class="sec-title">Tech Stack</h2></div>
       <div class="stack-grid">
         <div class="stack-card"><div class="stack-layer">Database</div><div class="stack-name">CockroachDB</div><div class="stack-detail">PostgreSQL-compatible, distributed. Used via SQLAlchemy ORM.</div></div>
         <div class="stack-card"><div class="stack-layer">ORM / Migrations</div><div class="stack-name">SQLAlchemy + Alembic</div><div class="stack-detail">Declarative models. Alembic handles all schema migrations.</div></div>
@@ -794,9 +927,9 @@
       </div>
     </section>
 
-    <!-- 14 Architecture -->
+    <!-- 15 Architecture -->
     <section class="section" id="architecture">
-      <div class="sec-head"><span class="sec-num">14</span><h2 class="sec-title">System Architecture</h2></div>
+      <div class="sec-head"><span class="sec-num">16</span><h2 class="sec-title">System Architecture</h2></div>
       <div class="arch-layer">
         <div class="arch-row">
           <div class="arch-box">
@@ -848,9 +981,9 @@
       </div>
     </section>
 
-    <!-- 15 Code Structure -->
+    <!-- 16 Code Structure -->
     <section class="section" id="code-structure">
-      <div class="sec-head"><span class="sec-num">15</span><h2 class="sec-title">Monorepo Code Structure</h2></div>
+      <div class="sec-head"><span class="sec-num">17</span><h2 class="sec-title">Monorepo Code Structure</h2></div>
       <div class="code-tree">
         <span class="tree-dir">/</span>
         <span class="tree-indent tree-dir">backend/</span>
@@ -884,7 +1017,14 @@
         <span class="tree-indent3" style="padding-left:80px;display:block;"><span class="tree-file">schemas.py + agent.py</span></span>
         <span class="tree-indent3 tree-dir">resume_parser/</span>
         <span class="tree-indent3" style="padding-left:80px;display:block;"><span class="tree-file">schemas.py + agent.py + pdf_extractor.py</span></span>
+        <span class="tree-indent3 tree-dir">form_answer_drafter/ <span class="tree-comment"># v2</span></span>
+        <span class="tree-indent3" style="padding-left:80px;display:block;"><span class="tree-file">schemas.py + agent.py</span></span>
         <span class="tree-indent3 tree-dir">routers/ <span class="tree-comment"># agent_router.py — unified /agents/* endpoints</span></span>
+        <span class="tree-indent2 tree-dir">form_fill/ <span class="tree-comment"># v2 — field classification + form_answers table</span></span>
+        <span class="tree-indent3 tree-file">models.py <span class="tree-comment"># FormAnswer table</span></span>
+        <span class="tree-indent3 tree-file">schemas.py</span>
+        <span class="tree-indent3 tree-dir">service/ <span class="tree-comment"># form_fill_service.py</span></span>
+        <span class="tree-indent3 tree-dir">routers/ <span class="tree-comment"># form_fill_router.py</span></span>
         <span class="tree-indent2 tree-dir">gmail/</span>
         <span class="tree-indent3 tree-file">models.py <span class="tree-comment"># GmailCredential table</span></span>
         <span class="tree-indent3 tree-file">schemas.py</span>
@@ -900,7 +1040,7 @@
         <span class="tree-indent tree-dir">extension/ <span class="tree-comment"># Chrome MV3 extension</span></span>
         <span class="tree-indent2 tree-file">manifest.json</span>
         <span class="tree-indent2 tree-dir">background/ <span class="tree-comment"># service-worker.js</span></span>
-        <span class="tree-indent2 tree-dir">content/ <span class="tree-comment"># linkedin-detector.js, overlay-injector.js</span></span>
+        <span class="tree-indent2 tree-dir">content/ <span class="tree-comment"># linkedin-detector.js, overlay-injector.js, formFiller.ts (v2)</span></span>
         <span class="tree-indent2 tree-dir">panel/ <span class="tree-comment"># React app (shadow DOM) — Home, History, Profile tabs</span></span>
         <span class="tree-indent2 tree-dir">options/ <span class="tree-comment"># Settings page</span></span>
         <span class="tree-indent tree-dir">web/ <span class="tree-comment"># React SPA — profile management + admin dashboard</span></span>
@@ -912,9 +1052,9 @@
       </div>
     </section>
 
-    <!-- 16 Database -->
+    <!-- 17 Database -->
     <section class="section" id="database">
-      <div class="sec-head"><span class="sec-num">16</span><h2 class="sec-title">Database Schema (Key Tables)</h2></div>
+      <div class="sec-head"><span class="sec-num">18</span><h2 class="sec-title">Database Schema (Key Tables)</h2></div>
       <div class="prose"><p>All tables are managed via Alembic migrations. CockroachDB is used as a PostgreSQL-compatible distributed database.</p></div>
       <div class="schema-grid">
         <div class="schema-card">
@@ -980,6 +1120,37 @@
             <span class="schema-field"><span class="field-name">status</span><span class="field-type">enum</span></span>
             <span class="schema-field"><span class="field-name">sent_at</span><span class="field-type">timestamptz</span></span>
             <span class="schema-field"><span class="field-name">is_archived</span><span class="field-type">bool</span></span>
+            <span class="schema-field"><span class="field-name">gmail_message_id</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">gmail_thread_id</span><span class="field-type">varchar</span></span>
+          </div>
+        </div>
+        <div class="schema-card">
+          <div class="schema-header">gmail_sent_messages <span class="badge b-v2" style="margin-left:6px;">v2</span></div>
+          <div class="schema-fields">
+            <span class="schema-field"><span class="field-name">id</span><span class="field-type">uuid</span><span class="field-pk">PK</span></span>
+            <span class="schema-field"><span class="field-name">user_id</span><span class="field-type">uuid</span><span class="field-fk">FK</span></span>
+            <span class="schema-field"><span class="field-name">gmail_message_id</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">gmail_thread_id</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">subject</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">recipient</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">sent_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">application_id</span><span class="field-type">uuid</span><span class="field-fk">FK</span></span>
+            <span class="schema-field"><span class="field-name">reply_detected</span><span class="field-type">bool</span></span>
+            <span class="schema-field"><span class="field-name">is_archived</span><span class="field-type">bool</span></span>
+            <span class="schema-field"><span class="field-name">synced_at</span><span class="field-type">timestamptz</span></span>
+          </div>
+        </div>
+        <div class="schema-card">
+          <div class="schema-header">mail_followups <span class="badge b-v2" style="margin-left:6px;">v2</span></div>
+          <div class="schema-fields">
+            <span class="schema-field"><span class="field-name">id</span><span class="field-type">uuid</span><span class="field-pk">PK</span></span>
+            <span class="schema-field"><span class="field-name">gmail_sent_message_id</span><span class="field-type">uuid</span><span class="field-fk">FK</span></span>
+            <span class="schema-field"><span class="field-name">follow_up_number</span><span class="field-type">int</span></span>
+            <span class="schema-field"><span class="field-name">drafted_subject</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">drafted_body</span><span class="field-type">text</span></span>
+            <span class="schema-field"><span class="field-name">gmail_message_id</span><span class="field-type">varchar</span></span>
+            <span class="schema-field"><span class="field-name">sent_at</span><span class="field-type">timestamptz</span></span>
+            <span class="schema-field"><span class="field-name">created_at</span><span class="field-type">timestamptz</span></span>
           </div>
         </div>
         <div class="schema-card">
@@ -1023,6 +1194,17 @@
       </div>
       <div class="schema-grid" style="margin-top:12px;">
         <div class="schema-card">
+          <div class="schema-header">form_answers <span class="badge b-v2" style="margin-left:6px;">v2</span></div>
+          <div class="schema-fields">
+            <span class="schema-field"><span class="field-name">id</span><span class="field-type">uuid</span><span class="field-pk">PK</span></span>
+            <span class="schema-field"><span class="field-name">profile_id</span><span class="field-type">uuid</span><span class="field-fk">FK</span></span>
+            <span class="schema-field"><span class="field-name">question_text_normalized</span><span class="field-type">text</span></span>
+            <span class="schema-field"><span class="field-name">answer</span><span class="field-type">text</span></span>
+            <span class="schema-field"><span class="field-name">source</span><span class="field-type">enum</span></span>
+            <span class="schema-field"><span class="field-name">last_used_at</span><span class="field-type">timestamptz</span></span>
+          </div>
+        </div>
+        <div class="schema-card">
           <div class="schema-header">invite_codes</div>
           <div class="schema-fields">
             <span class="schema-field"><span class="field-name">id</span><span class="field-type">uuid</span><span class="field-pk">PK</span></span>
@@ -1040,9 +1222,9 @@
       <div class="prose"><p>Additional sub-tables follow the same pattern: <code>profile_projects</code>, <code>profile_education</code>, <code>profile_certifications</code>, <code>profile_achievements</code>, <code>profile_languages</code>, <code>experience_projects</code>. All reference <code>profile_id</code> as a foreign key.</p></div>
     </section>
 
-    <!-- 17 Auth & Security -->
+    <!-- 19 Auth & Security -->
     <section class="section" id="auth">
-      <div class="sec-head"><span class="sec-num">17</span><h2 class="sec-title">Auth &amp; Security</h2></div>
+      <div class="sec-head"><span class="sec-num">19</span><h2 class="sec-title">Auth &amp; Security</h2></div>
       <div class="tw">
         <table>
           <thead><tr><th>Concern</th><th>Approach</th></tr></thead>
@@ -1054,15 +1236,17 @@
             <tr><td>Gmail tokens</td><td>Access and refresh tokens encrypted at rest (AES-256) using a server-side key. Never returned to client in plaintext. Revocable by user at any time.</td></tr>
             <tr><td>Passwords</td><td>bcrypt hashing with salt. Never stored or logged in plaintext.</td></tr>
             <tr><td>LinkedIn DOM scraping</td><td>Extension reads public post content visible to the logged-in user. No credentials captured. Complies with robots.txt scope (user-initiated only).</td></tr>
+            <tr><td>Form autofill site permissions <span class="badge b-v2">v2</span></td><td>Does not use a blanket <code>&lt;all_urls&gt;</code> content-script grant. Either a user-maintained per-site allowlist or Chrome's <code>activeTab</code> permission (current tab only, only after explicit user action) scopes access to just the pages the user chooses to run it on.</td></tr>
+            <tr><td>Form autofill submission &amp; CAPTCHA policy <span class="badge b-v2">v2</span></td><td>The extension never clicks Submit or auto-advances a multi-step form — the user always does. If a CAPTCHA or bot-verification challenge appears, the extension stops and the user solves it manually; no detection-evasion or solving service is used.</td></tr>
             <tr><td>CORS</td><td>FastAPI CORS middleware restricted to extension origin + web app domain.</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- 18 Metrics & Admin -->
+    <!-- 19 Metrics & Admin -->
     <section class="section" id="metrics">
-      <div class="sec-head"><span class="sec-num">18</span><h2 class="sec-title">Metrics &amp; Admin</h2></div>
+      <div class="sec-head"><span class="sec-num">20</span><h2 class="sec-title">Metrics &amp; Admin</h2></div>
       <div class="subsec">
         <h3 class="subsec-title">Per-User Metrics (visible to the user)</h3>
         <ul class="il">
@@ -1093,9 +1277,9 @@
       </div>
     </section>
 
-    <!-- 19 User Stories -->
+    <!-- 21 User Stories -->
     <section class="section" id="stories">
-      <div class="sec-head"><span class="sec-num">19</span><h2 class="sec-title">User Stories</h2></div>
+      <div class="sec-head"><span class="sec-num">21</span><h2 class="sec-title">User Stories</h2></div>
       <div class="story">As <em>a job seeker on LinkedIn</em>, I want to press a shortcut key and click a hiring post so that I can get a drafted cold email in under 10 seconds without leaving LinkedIn.</div>
       <div class="story">As <em>a user targeting multiple roles</em>, I want to save a separate profile for each job title (e.g., "GenAI Engineer" and "Data Engineer") so the email drafts are tailored to the specific role I'm applying for.</div>
       <div class="story">As <em>a user setting up my profile</em>, I want to upload my resume PDF and have the system auto-fill my profile fields so I don't have to type everything from scratch — and I can correct anything the parser got wrong.</div>
@@ -1104,11 +1288,13 @@
       <div class="story">As <em>a user reviewing past applications</em>, I want to see every post I clicked — with the email I sent and its current status — so I can track my outreach and follow up when needed.</div>
       <div class="story">As <em>Pranay (admin)</em>, I want to see how many tokens each user consumed today so I can track LLM costs and plan billing without seeing users' private data.</div>
       <div class="story">As <em>a user on a post with no email address</em>, I want the extension to tell me no email was found and let me enter one manually, so I can still use the drafting and tracking features.</div>
+      <div class="story">As <em>a user filling out a company's own application form</em>, I want my name/email/phone/employer autofilled from my profile and the essay-style questions ("tell me about a difficult situation," "describe a RAG project you built") drafted from my real experience, so a 15-minute form takes under a minute — with everything left editable before I submit it myself.</div>
+      <div class="story">As <em>a user who emailed several recruiters weeks ago</em>, I want a single table of everyone I've contacted with no reply yet, a drafted follow-up ready for me to review, and a one-click send into the same email thread, so following up doesn't mean digging through my sent folder and manually re-composing.</div>
     </section>
 
-    <!-- 20 Open Questions -->
+    <!-- 22 Open Questions -->
     <section class="section" id="questions">
-      <div class="sec-head"><span class="sec-num">20</span><h2 class="sec-title">Open Questions</h2></div>
+      <div class="sec-head"><span class="sec-num">22</span><h2 class="sec-title">Open Questions</h2></div>
       <div class="callout callout-info" style="margin-bottom:20px;">
         <p>All open questions are resolved below. No remaining blockers before implementation.</p>
       </div>
@@ -1179,6 +1365,14 @@
             <span style="font-weight:700;color:var(--text-primary);">Data flow:</span><br>
             Extension &rarr; Content Script &rarr; Reads current DOM &rarr; Extracts selected post only &rarr; Sends JSON &rarr; Background Script &rarr; FastAPI Backend
           </div>
+        </div>
+        <div class="q-item">
+          <div class="q-num" style="background:var(--success-bg);color:var(--success);">&#10003;</div>
+          <p><strong>Form autofill (§14) — same safe-by-design posture, extended to arbitrary sites.</strong> Full exploration in <code>docs/FORM_AUTOFILL_EXTENSION.md</code>. Three points resolved there and carried into this PRD: (1) permission scope stays as narrow as possible — a per-site allowlist or <code>activeTab</code>, not a blanket <code>&lt;all_urls&gt;</code> grant, decided before implementation begins; (2) the extension only ever acts on a page the user is already viewing and never performs background fetches of other sites, unlike the sourcing question covered in <code>docs/OPPORTUNITY_SOURCES_EXTENSION.md</code>; (3) submission is always a manual, human action — no auto-submit mode exists or will be added, and any CAPTCHA/bot-verification challenge is left for the user to solve, never bypassed.</p>
+        </div>
+        <div class="q-item">
+          <div class="q-num" style="background:var(--success-bg);color:var(--success);">&#10003;</div>
+          <p><strong>Gmail Follow-Up Manager (§11) — whole Sent mailbox, paginated newest-first, flagged by source.</strong> Confirmed: this covers the user's entire Sent mailbox (not just platform-sent ones), with each row flagged <span class="badge b-req" style="font-size:10px;">Platform</span> or <span class="badge b-be" style="font-size:10px;">External</span> by matching <code>gmail_message_id</code> against <code>applications</code>. Navigation is pagination (page size 10/20/50/100), not a required date range up front — a date range is an optional filter on top, narrowing what gets paged through. This still only needs the <code>gmail.metadata</code> scope (headers/labels only; listing/paging is not restricted by that scope) — <code>gmail.readonly</code> is not required. This creates two real, deliberate trade-offs, both surfaced directly in the UI rather than hidden: (1) External-row follow-up drafts can only be grounded in the Subject header (no body was ever read), so they're intentionally shorter/more generic — see §11's drafting flow; (2) the Mailbox Summary is computed over what's been paged through so far, not the whole mailbox at once (walking every page up front to get an exact total would defeat pagination), backstopped by Gmail's own approximate <code>resultSizeEstimate</code> for a headline count. Still open for a future pass: whether follow-up reminders should ever surface proactively (e.g. a badge/count) rather than purely on-demand when the user opens "Manage Gmail" — not built here, since anything resembling background polling of the user's mailbox needs its own explicit privacy/ToS review before being added, the same caution already applied to LinkedIn extraction above.</p>
         </div>
       </div>
     </section>

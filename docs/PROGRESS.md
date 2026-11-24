@@ -22,6 +22,8 @@ not being redone, just reused as the backend half of Features 1 and 2.
 | 9 | *(v2)* Post Relevance Scorer | ✅ done — backend fully verified via curl (matching/mismatched/no-profile scenarios); extension/Web SPA built and type-check clean, live browser walkthrough pending user's pass |
 | 10 | Extension→SPA link, Archiving, Invite/Admin lifecycle | ✅ done — backend fully verified via curl (archive/unarchive, invite expiry/revoke/used-by, 30-day default access, admin revoke/restore/access-update, real-time expiry enforcement); extension/Web SPA built and type-check clean, live browser walkthrough pending user's pass |
 | 11 | Duplicate-contact warning at extraction time | ✅ done — backend fully verified via curl (poster_profile_url match, email match, self-exclusion, discard-when-extracted/409-when-not); extension built and type-check clean, live browser walkthrough pending user's pass |
+| 12 | *(v2)* Application form autofill — Step 1 only | 🟡 in progress — Step 1's heuristic-only slice (no LLM fallback yet, no file-upload autofill yet) built and type-checked; live browser walkthrough (both the new activeTab-injection path and the Autofill tab itself) pending user's pass. Step 2 (subjective-question drafting) not started. |
+| 13 | *(v2)* Gmail Follow-Up Manager | 🟡 in progress — backend fully built and curl-verified up to the Gmail-OAuth boundary (auth/error-mapping paths confirmed; the actual sent-mail sync/draft/send paths need a real Gmail reconnect — see below). Extension built and type-check clean. Live browser walkthrough (reconnect Gmail, page through Sent mail, draft+send a follow-up on a Platform and an External row, archive/unarchive) pending user's pass. |
 
 ## Environment notes (checked 2026-07-01)
 
@@ -778,6 +780,12 @@ groq_jd_parser_models      = [gpt-oss-20b, llama-4-scout-17b-16e-instruct, qwen3
 groq_resume_parser_models  = [gpt-oss-20b, gpt-oss-120b, llama-4-scout-17b-16e-instruct, llama-3.3-70b-versatile]
 groq_email_drafter_models  = [gpt-oss-120b, gpt-oss-20b, llama-4-scout-17b-16e-instruct, llama-3.3-70b-versatile]
 ```
+> ⚠️ **SUPERSEDED 2026-08-12 — the lists above are wrong and no longer in the code.** Two of the
+> claims in this section turned out to be false when finally tested against the live API rather
+> than read off the docs. See "Groq fallback correction (2026-08-12)" below for what replaced them.
+> Everything from here to the end of this Feature 5 section is kept only as a record of what was
+> believed at the time.
+
 - Only `openai/gpt-oss-20b` and `openai/gpt-oss-120b` are confirmed to support **strict**
   `json_schema` (guaranteed schema compliance) per Groq's docs. `meta-llama/llama-4-scout-17b-
   16e-instruct` supports json_schema only in **best-effort** mode (schema compliance not
@@ -815,6 +823,79 @@ groq_email_drafter_models  = [gpt-oss-120b, gpt-oss-20b, llama-4-scout-17b-16e-i
 - `resume_parser`'s `_looks_empty`-triggers-next-model behavior specifically (as opposed to the
   bare mechanism) is similarly unverified end-to-end for the same quota reason — see the still-open
   backlog item in `BUILD_PLAN.md` about re-verifying the incomplete-extraction mitigation.
+
+### Groq fallback correction (2026-08-12) — the fallback chain never actually worked
+
+Triggered by a real `POST /applications/{id}/draft` 500. The traceback showed the Email Drafter
+exhausting into `groq.NotFoundError: The model meta-llama/llama-4-scout-17b-16e-instruct does not
+exist or you do not have access to it`. Root-causing that turned up **three independent bugs, two
+of which meant the multi-model fallback could never have worked as designed** — which is why the
+"Not verified" caveat above matters so much in hindsight: the mechanism was reviewed by hand and
+looked right, but had never once been exercised.
+
+**1. Two model ids were dead.** `meta-llama/llama-4-scout-17b-16e-instruct` and `qwen/qwen3-32b`
+have been decommissioned by Groq. Live text models on this account, from
+`GET /openai/v1/models`: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`,
+`openai/gpt-oss-safeguard-20b`, `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`,
+`llama-3.1-8b-instant`, plus `groq/compound*`, `allam-2-7b`, whisper/orpheus.
+
+**2. The retry loop caught the wrong exception type.** It caught
+`BadRequestError, RateLimitError, OutputParserException`. A dead model id raises
+`groq.NotFoundError` (404), which is none of those — so it escaped the loop and failed the request
+on attempt 3, and the 4th model was never tried. Now all six agents catch `groq.APIStatusError`,
+the base class of every HTTP-status error the SDK raises.
+
+**3. A bare `assert isinstance(parsed, ...)` bypassed the loop the same way.** With
+`include_raw=True`, a schema-violating response is *not* raised — it returns `parsed=None` with the
+detail in `parsing_error`. The bare assert turned that into an `AssertionError` (empty message),
+which also isn't in the except clause, so one bad response killed the whole request instead of
+advancing to the next model. All six agents now convert that case into an `OutputParserException`
+and let the normal fallback path handle it.
+
+Separately, the original 400 that started the cascade: `json_validate_failed: max completion tokens
+reached before generating a valid document`. The gpt-oss models are **reasoning** models and spend
+reasoning tokens from the same `max_tokens` budget before emitting any JSON. `email_drafter` was
+capped at 400/1024 and never passed `reasoning_effort`, unlike `resume_parser`. Every agent now
+passes `reasoning_effort="low"` for gpt-oss and has a larger cap.
+
+**Model support, established by probing the live API rather than reading the docs** — the docs
+were the source of two wrong claims above, so this table is the authority:
+```
+json_schema      OK: gpt-oss-20b, gpt-oss-120b, gpt-oss-safeguard-20b, qwen3.6-27b
+function_calling OK: gpt-oss-*, llama-3.3-70b-versatile, llama-3.1-8b-instant
+```
+- **`llama-3.3-70b-versatile` does not support `json_schema` at all** — it 400s with "This model
+  does not support response format `json_schema`". It had been sitting in the last slot of all five
+  json_schema agents' lists, where it could never have answered a single call. Removed from those
+  five; kept in `jd_parser`, the one `function_calling` agent, where it genuinely works.
+- `qwen/qwen3.6-27b` is the reverse: json_schema works, `function_calling` reliably fails
+  ("Failed to call a function"). So it must never go in `jd_parser`'s list.
+- `qwen/qwen3.6-27b` is also a heavy reasoner with no `reasoning_effort` control — measured at
+  2452–3140 output tokens for a single short email draft, and it hard-fails at 2048. Each
+  json_schema agent therefore gives it `max_tokens=4096` specifically (`4096 if "qwen" in model`).
+- `openai/gpt-oss-safeguard-20b` is nominally a safety-classifier model but was verified to produce
+  sound normal output on every one of these agents' real prompts, cheaply (~200 output tokens for a
+  full draft). It's the new 3rd slot everywhere.
+
+**Verified — this time actually end-to-end**, every agent against every model in its own list, 24
+real API calls (`scratchpad/t_matrix.py` pattern: pin `settings.groq_*_models` to one model, invoke
+the agent's real public entrypoint):
+- jd_parser 4/4, email_drafter 4/4, followup_drafter 4/4, relevance_scorer 4/4,
+  field_classifier 4/4, resume_parser 2/4.
+- Fallback recovery confirmed directly: with the dead scout id injected as attempt 1, the log shows
+  `attempt 1 failed ... 404` followed by a successful draft on `openai/gpt-oss-120b` — i.e. the
+  behaviour that was supposed to happen in the original incident.
+
+**Known-remaining, deliberately not fixed here (separate defect, cross-stack blast radius):**
+`resume_parser` fails on `gpt-oss-120b` and `qwen3.6-27b` for a resume whose education entry has no
+identifiable institution. Cause is not the models — it's
+`ResumeParserLLMOutput.education[].institution_name`, typed as a **required non-null `str`**. The
+models correctly emit `null` when the resume doesn't name an institution, and pydantic then rejects
+the entire parse. Making it nullable means `agents/resume_parser/schemas.py` + `profiles/schemas.py`
++ `profiles/models.py` + an Alembic migration (`profile_education.institution_name` is
+`nullable=False`) + `frontend/web/src/api/types.ts` and `EducationSection.tsx`. Note the fallback
+loop does not rescue this: every model hits the same schema wall, so such a resume still fails after
+all 4 attempts.
 
 ### Feature 6 — Gmail connect + send — ✅ done, verified end-to-end by the user in real Chrome
 
@@ -1608,6 +1689,245 @@ warning banner appears on the extraction result immediately, before drafting; cl
 this" and confirm the application disappears from the tracker; separately, click "View that
 application" and confirm the modal shows the right record without navigating away, and that closing
 it returns to the same extraction result state.
+
+### Feature 12 (v2) — Application form autofill, Step 1 only — 🟡 in progress, built and type-checked; live browser pass pending
+
+**Scope:** PRD §13 / `docs/FORM_AUTOFILL_EXTENSION.md`. Two-step feature; this session built **only
+Step 1** (known-field autofill), and within Step 1, only the doc's own recommended first slice:
+heuristic matching (HTML `autocomplete` attribute + label-text synonym table), **no LLM
+classification fallback** and **no file-upload (resume) field autofill** — both explicitly deferred,
+see below. Step 2 (subjective/open-ended question drafting via a new agent) is a separate, not-yet-
+started feature.
+
+**A real architectural change, not just a new tab:** the extension previously only ever ran on
+`linkedin.com` via a static `content_scripts` manifest entry. Filling a form on an arbitrary
+company's career page needed a way to run there too, without a blanket `<all_urls>` grant. Resolved
+(user's explicit choice, not assumed) as **`activeTab` + on-demand injection** — see below — rather
+than a user-maintained site allowlist.
+
+**A real constraint surfaced during design, not fixed this session:** the backend deliberately never
+sends resume PDF bytes to the client (`docs/prd.html` §18, Auth & Security table: "Presigned URLs
+are never exposed to the client — the backend reads the file server-side at send time only"). That
+rules out autofilling a file-upload ("Resume") field without adding a new byte-serving endpoint,
+which doesn't exist — **file-input autofill is out of scope for this slice**, not an oversight.
+
+**What was built:**
+
+- `frontend/extension/public/manifest.json` — added `"activeTab"` and `"scripting"` to
+  `permissions`. No new `host_permissions` entry — `activeTab` covers the target tab implicitly for
+  the duration of the user gesture (command/action-click) that triggers it. The static
+  `content_scripts` entry (LinkedIn-only) is unchanged.
+- `background/service-worker.ts` — `toggleActiveTabPanel()` now tries `chrome.tabs.sendMessage`
+  first (unchanged, instant path — this is what LinkedIn's pre-existing static content script still
+  uses) and, only on failure (no content script present on this tab yet), falls back to
+  `chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] })` followed by a retry
+  `sendMessage` — this is what makes Alt+J / the toolbar-icon click work on **any** page now, not
+  just LinkedIn. Also added `getProfileDetail(profileId)` (`authorizedFetch(`/profiles/${id}`)`,
+  same shape as every other handler) and a `"GET_PROFILE_DETAIL"` message case — needed because the
+  existing `GET_PROFILES`/`ProfileSummary` only carries `id`/`target_job_title`/`is_default`, not the
+  `personal_info`/`experiences` autofill actually needs. **No backend changes at all were needed for
+  this** — `GET /profiles/{id}` (built in Feature 2) already returns the full shape.
+- `content/main.tsx` — the previously-unconditional `mount()` at the bottom is now `ensureMounted()`
+  (the guard already existed, just wasn't used here). Necessary because on-demand injection re-runs
+  the whole script from scratch on every `executeScript` call (a fresh IIFE realm each time, even
+  though the DOM persists) — without this, a hypothetical repeat injection on the same tab would
+  create a duplicate host/React root. In practice the sendMessage-first order above means this
+  rarely re-runs once a tab already has the script, but this makes it correct rather than merely
+  lucky.
+- `shared/types.ts` — `PersonalInfo`, `ExperienceSummary` (trimmed: job_title/company_name/
+  currently_working_here/start_date only), `ProfileDetail` (mirrors backend `ProfileResponse`,
+  trimmed to what autofill needs — no skills/education/projects), `GET_PROFILE_DETAIL` message,
+  `GetProfileDetailResponse`.
+- `content/formFiller.ts` (new) — pure client-side, no network calls:
+  - `discoverFields()` — queries `input, textarea, select`, filters out disabled/invisible/excluded
+    types (`hidden`/`submit`/`button`/`reset`/`image`/`file`/`password`/`range`/`color` — file and
+    password are both deliberately never touched). Radio buttons are pre-grouped by `name` into one
+    `"radio-group"` descriptor per group (a `<fieldset><legend>` question with several `<input
+    type=radio>` options), not treated as individual fields.
+  - `resolveLabel()` — standard `<label for>` → wrapping `<label>` → `aria-label`/
+    `aria-labelledby` → nearest-preceding-text-node climb → `placeholder` chain. The nearest-
+    preceding-text fallback is the same *philosophy* as `postExtraction.ts`'s structural DOM climb
+    (don't trust selectors on a page you don't control) but a different concrete technique, since
+    real `<form>` markup usually has real `<label>` elements, unlike LinkedIn's post cards.
+  - `classifyField()` — a `textarea`, `[[contenteditable]]`-style large field, or a `maxLength >
+    150` field, or a label containing a question-like phrase ("describe", "tell us", "explain",
+    "why do you", …) is classified `"subjective"` and left completely untouched (Step 2's job, not
+    built). Otherwise: `autocomplete` token lookup table first (`given-name`→`first_name`, etc.),
+    then a normalized-label synonym table (`current_employer`: "current employer"/"current
+    company"/"employer name"/"where do you currently work"/…) covering `first_name`, `last_name`,
+    `full_name`, `email`, `phone_number`, `current_city`, `state_province`, `country`,
+    `linkedin_url`, `github_url`, `portfolio_website`, `personal_website`, `work_authorization`,
+    `willing_to_relocate`, `nationality`, `current_employer`, `current_job_title` (the latter two
+    derived from whichever `ExperienceSummary` has `currently_working_here: true`, else the most
+    recent by `start_date`). Anything neither pass resolves is left alone — **no LLM fallback in
+    this slice**, per the design doc's own recommended phasing (build the free heuristic path first,
+    design the fallback prompt later against real unmapped-field examples).
+  - Value writing uses the native property setter (via
+    `Object.getOwnPropertyDescriptor(...HTMLInputElement.prototype, "value").set`) plus dispatched
+    `input`/`change` events — required for React/Vue-controlled fields, which otherwise silently
+    revert a plain `element.value =` assignment on the next render. `<select>`/radio-group values are
+    matched against visible option text via a simple two-way substring comparison (no fuzzy-distance
+    library added — consistent with this codebase having none today), then the matched radio gets a
+    real `.click()` (not a direct `.checked` mutation) so the page's own click handler fires
+    normally.
+  - Every successfully-filled element gets an inline `style.outline`/`outlineOffset` mutation
+    (green, reusing the existing success color) — same technique as `postExtraction.ts`'s hover
+    highlight, never a CSS class or a `document.head` stylesheet, so this stays safe to run on an
+    arbitrary third-party page.
+  - `autofillForm(profile)` returns `{ total, filled, skipped }` — `total`/`skipped` only count
+    fields that were actually *classified* to a known key (i.e. "known fields"), not every random
+    input on the page; `skipped` means classified but not filled (empty value on the profile, or no
+    matching select/radio option) so the UI can tell the user exactly what to fill in by hand.
+- `content/AutofillView.tsx` (new) — new tab: profile picker (reuses the existing `GET_PROFILES`
+  message, defaults to `is_default`, identical dropdown pattern to `HomeView.tsx`'s
+  `DraftEmailSection`), a "Fill this page" button that fetches the full profile via
+  `GET_PROFILE_DETAIL` then calls `autofillForm()` directly (no backend call for the fill itself),
+  and a result summary ("Filled N of M known fields" + a list of unmatched labels). Copy explicitly
+  states fields are outlined for review and nothing is ever submitted automatically.
+- `content/LoggedInView.tsx` — added a 4th tab, `"autofill"`, shown unconditionally on every page
+  (no hostname gating — harmless to show on LinkedIn or an unrelated page, it just finds 0 or few
+  matches there).
+- No `styles.ts` changes needed — reused existing `.field`/`.btn-primary`/`.muted`/`.error-text`/
+  `.success-text`/`.notice-text` classes and the codebase's existing convention of inline `style={}`
+  for one-off spacing, rather than adding a new visual system for one tab.
+- No backend files, no Alembic migration, no new npm dependency.
+
+**Verified:**
+- `npm run build` succeeds (`background.js` 7.00 kB, `content.js` 186.05 kB — up from ~147 kB
+  pre-feature, expected given the new tab/module); `node --check` passes on both bundles;
+  `manifest.json` confirmed valid JSON.
+- `npx tsc --noEmit` shows only the pre-existing, already-documented unrelated `shared/storage.ts`
+  error (see Feature 1/4's notes) — confirmed no new type errors from any file this feature touched.
+
+**Not yet verified — needs the user's real-Chrome pass** (I can't drive a browser myself, same
+limitation as every prior feature):
+1. Regression check: Alt+J on an actual `linkedin.com` page still opens instantly via the unchanged
+   `sendMessage`-first path, and Extract/History/Usage still work exactly as before.
+2. The new path: Alt+J (or the toolbar icon) on a real third-party job-application form (e.g. a
+   public Greenhouse- or Lever-hosted "apply" page) now opens the panel there too via the new
+   inject-on-failure fallback — previously did nothing on non-LinkedIn pages. Re-pressing Alt+J on
+   the same tab toggles closed without creating a duplicate panel (confirms both the
+   `ensureMounted()` fix and that the second toggle succeeds via plain `sendMessage`, not a second
+   injection).
+3. On the new Autofill tab against a real form: pick a profile, click "Fill this page", confirm
+   name/email/phone/city/etc. fields actually get filled and outlined, `<textarea>`/essay fields are
+   left untouched, the "Filled N of M" count is accurate, and nothing is ever submitted
+   automatically. Also confirm a page with no matching fields reports "0 of 0" cleanly.
+
+**How to run/verify it locally:** `cd frontend/extension && npm run build`, load unpacked from
+`dist/` (same as every prior extension feature). No backend changes to run/restart for this feature.
+Needs at least one saved profile with `personal_info` filled in (Feature 2) to have anything to
+autofill with.
+
+### Feature 13 (v2) — Gmail Follow-Up Manager — 🟡 in progress, backend built and curl-verified up to the OAuth boundary; extension built and type-checked; live browser pass pending
+
+**Scope, locked in during planning (2026-07-14), corrected once mid-design from the user's own
+feedback:** the first draft required a date range up front and treated the whole range as one
+batch load. Corrected to: pagination (newest-first, page size 10/20/50/100) is the primary
+navigation; a date range is an optional filter on top, not a precondition. `docs/prd.html` §11 and
+`docs/BUILD_PLAN.md` Feature 13 were updated to match before implementation started — see those
+for the full design (mailbox-summary fidelity trade-off, `gmail.metadata`-not-`gmail.readonly`
+scope reasoning, Platform/External flagging).
+
+**What was built:**
+
+Backend:
+- `alembic/versions/0013_create_mailbox_tables.py` — adds `applications.gmail_message_id`/
+  `gmail_thread_id` (+ index), new `gmail_sent_messages` (per-user cache of paged-through Sent
+  messages, unique on `(user_id, gmail_message_id)`) and `mail_followups` tables. Applied to the
+  live CockroachDB Cloud cluster.
+- `applications/models.py` — `Application` gained `gmail_message_id`/`gmail_thread_id` columns.
+  `applications/service/application_service.py`'s `send_application_email`/`_persist_sent` now
+  persist both — previously `gmail_service.send_message`'s returned message id was logged and
+  discarded; this is what makes the Platform/External flag possible at all.
+- `gmail/service/gmail_service.py` — `_SCOPE` widened to `gmail.send gmail.metadata
+  userinfo.email` (existing connected users must reconnect once — no other change needed,
+  `handle_oauth_callback` already upserts tokens in place). `_get_valid_access_token` renamed to
+  `get_valid_access_token` (now called once per page request from `mailbox_service`, not once per
+  Gmail call). `send_message`'s return changed `str` → `tuple[str, str]` (message id, thread id).
+  New: `list_sent_messages_page` (one `messages.list?q=in:sent[...]&maxResults=&pageToken=` call,
+  returns ids + next token + `resultSizeEstimate`), `get_message_metadata` (`format=metadata`,
+  Subject/To/Date/Message-Id headers only), `get_thread_reply_status` (thread-wide metadata scan —
+  any message not from the connected address flags a reply; also returns the thread's latest
+  `Message-Id` header for the next follow-up's `In-Reply-To`), `send_reply` (plain-text MIME, no
+  attachment, `In-Reply-To`/`References` headers + `threadId` on the send payload).
+- `backend/agents/followup_drafter/` (new, mirrors `agents/email_drafter` almost verbatim per the
+  existing convention: `@task _run_llm` → `@entrypoint()` → public `async def draft_followup`,
+  4-model Groq fallback via new `settings.groq_followup_drafter_models`, `method="json_schema"`,
+  `include_raw=True`, `temperature=0.4`, `max_tokens=600`). Two system-prompt branches keyed on
+  `grounding` (mirrors `email_drafter`'s `is_dm` branch): `full` (Platform rows — grounded in the
+  original email body + job context, tone shifts gentle→direct by `follow_up_number`) and
+  `subject_only` (External rows — the backend never read that email's body under `gmail.metadata`
+  scope, so the draft is explicitly told it only has the subject line and must stay generic/shorter).
+- `backend/mailbox/` (new module, `models.py`/`schemas.py`/`service/mailbox_service.py`/
+  `routers/mailbox_router.py`, same layering as `applications/`): `get_sent_mail_page` (fetches one
+  Gmail page, upserts new rows into `gmail_sent_messages` via `with_serialization_retry`,
+  re-checks reply status only for rows not already flagged replied, computes `MailboxSummary` from
+  cached rows matching the active date filter); `draft_followup` (stateless — no DB write, unlike
+  `applications.create_draft`, since a message can get multiple follow-ups over time and there's no
+  single "current draft" column to persist into); `send_followup` (persists a `mail_followups` row
+  only after a real send); `set_archived`. Five endpoints: `POST /mailbox/sent`,
+  `POST /mailbox/{id}/followup/draft`, `POST /mailbox/{id}/followup/send`,
+  `POST /mailbox/{id}/archive`, `POST /mailbox/{id}/unarchive` — registered in `main.py`, models
+  imported in `alembic/env.py`.
+- **Known, documented gap:** `MailboxSummary.avg_days_to_reply` is always `null` in this pass —
+  computing it would need the replying message's own `Date` header, which
+  `get_thread_reply_status` doesn't currently surface (only whether a reply exists). Left as a
+  documented gap rather than adding a second per-thread fetch loop for one figure — see the
+  comment in `mailbox_service._compute_summary`.
+
+Extension (`frontend/extension/src/`):
+- `shared/types.ts` — `SentMailRow`, `MailboxSummary` (mirrors backend schemas), `GET_SENT_MAIL_PAGE`/
+  `DRAFT_FOLLOWUP`/`SEND_FOLLOWUP`/`ARCHIVE_MAIL_ROW`/`UNARCHIVE_MAIL_ROW` messages + response types.
+- `background/service-worker.ts` — one `authorizedFetch`-based handler per message above, registered
+  in the existing switch, same shape as every prior handler (e.g. `markArchived`).
+- `content/ManageGmailView.tsx` (new) — page-token stack for Next/Previous (Gmail only gives a
+  forward token; "Previous" pops a client-side stack), page-size selector (10/20/50/100, resets to
+  page 1 on change), optional date-range filter ("Apply" resets to page 1), a `MailboxSummaryStrip`,
+  a sortable `<table>` (client-side sort/filter — source/reply-status/search/include-archived —
+  applied only within the currently-loaded page, per the documented scope decision), a
+  `FollowupModal` (reuses `.modal-overlay`/`.modal-card`, drafts on open via `DRAFT_FOLLOWUP`,
+  editable subject/body, "subject only" notice when `grounding === "subject_only"`, sends via
+  `SEND_FOLLOWUP`), and inline Archive/Unarchive per row.
+- `content/LoggedInView.tsx` — added a 5th tab, `"gmail"`.
+- `content/styles.ts` — added `.tag-platform`/`.tag-external`, `.control-row`, `.filter-note`,
+  `.mail-table*`, `.pagination-row` (table/sortable-header/pagination styles didn't exist before
+  this feature — every prior list view, e.g. `HistoryView`, used a flex `.list-row`, not a table).
+
+**Verified (backend, curl against the live cluster, up to the Gmail-OAuth boundary):**
+- `main.py` imports cleanly with the new router; `GET /openapi.json` lists all 5 `/mailbox/*` paths.
+- `POST /mailbox/sent` with no auth → `401`. With a valid token but no Gmail connected (fresh
+  throwaway `mailboxtest1@example.com` test account, created via the real `/auth/signup` flow with
+  an existing unused invite code — not a minted/hand-crafted token) → `409 "Gmail is not connected
+  for this account."`, confirming the auth + `GmailNotConnectedError` → 409 mapping works.
+- `followup/draft`, `followup/send`, `archive`, `unarchive` against a nonexistent mailbox row id →
+  clean `404 "Mailbox row not found"` on all four.
+- **Not verified — needs a real Gmail reconnect in a browser**, which nothing in this environment
+  can drive: the actual sync/list-page path, Platform-vs-External flagging against a real sent
+  application + a real externally-sent email, reply detection, follow-up drafting (both grounding
+  modes), follow-up sending into a real thread, and archive/unarchive against a real row. **The
+  existing test Gmail connection (Feature 6) only has `gmail.send`** — the user must click
+  "Disconnect" then "Connect Gmail" again to re-consent with the widened scope before any of this
+  can be tested at all.
+
+**Verified (extension):** `npx tsc --noEmit -p .` shows only the pre-existing, already-documented
+`shared/storage.ts` errors (see Feature 1/4/12's notes) — no new type errors from any file this
+feature touched. `npm run build` succeeds (`content.js` ~200 kB, up from ~187 kB pre-feature,
+expected given the new view/table/modal).
+
+**How to run/verify it locally:** `cd backend && uv run alembic upgrade head && uv run uvicorn
+main:app --reload --port 8123` (or without `--reload`, per the Feature 5 log's stale-worker note —
+**this session had to kill and manually restart a stale non-`--reload` worker mid-verification, the
+same class of issue** — always confirm the serving PID is actually new after a code change, don't
+trust logs alone), `cd frontend/extension && npm run build`, load unpacked. **Before testing in
+Chrome: reconnect Gmail** (Disconnect, then Connect again) so the token has the new `gmail.metadata`
+scope. Then: open the new "Gmail" tab, load the first page (no date filter needed), page
+Next/Previous, apply a date filter, draft+send a follow-up on both a Platform row (from a real sent
+application) and an External row (an email sent directly from Gmail), archive/unarchive a row.
+
+**New test data from this pass:** `mailboxtest1@example.com` (jobseeker, password `TestPass123!`),
+no profile/Gmail connection set up — created solely to exercise the 401/409/404 error paths above,
+harmless to leave or reuse for the real browser pass.
 
 ## Backend module log
 

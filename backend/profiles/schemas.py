@@ -148,6 +148,30 @@ class CloneProfileRequest(BaseModel):
     target_job_title: str = Field(min_length=1, max_length=255)
 
 
+class ClassifyFieldsField(BaseModel):
+    """One form field the extension's heuristic pass (content/formFiller.ts) couldn't confidently
+    match to a profile key by itself — sent to the Field Classifier agent as a last resort. Only
+    generic page structure (a question's caption/type/options), never the candidate's own data."""
+
+    index: int
+    text: str = Field(min_length=1, max_length=300)
+    field_type: str = Field(max_length=30)
+    options: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ClassifyFieldsRequest(BaseModel):
+    fields: list[ClassifyFieldsField] = Field(max_length=60)
+
+
+class ClassifyFieldsMatch(BaseModel):
+    index: int
+    key: str | None = None
+
+
+class ClassifyFieldsResponse(BaseModel):
+    matches: list[ClassifyFieldsMatch]
+
+
 class ResumeUploadResponse(BaseModel):
     """Resume file metadata only — file_path and raw_text are never sent to the client."""
 

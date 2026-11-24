@@ -1,7 +1,7 @@
 import logging
 import time
 
-from groq import BadRequestError, RateLimitError
+from groq import APIStatusError
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -51,7 +51,10 @@ def _run_llm(resume_text: str) -> tuple[ResumeParserLLMOutput, AgentUsageInfo]:
     # Multi-model fallback: each attempt uses a different model (index 0 = today's original single
     # default) rather than a blind retry of the same model — this is what actually works around a
     # per-model daily quota exhaustion (Groq's rate limits are per model).
-    last_error: BadRequestError | RateLimitError | OutputParserException | None = None
+    # groq.APIStatusError is the base class of every HTTP-status error the SDK raises
+    # (BadRequestError, RateLimitError, NotFoundError, ...) — naming only BadRequest/RateLimit let
+    # a decommissioned model id's 404 escape the loop instead of advancing to the next model.
+    last_error: APIStatusError | OutputParserException | None = None
     best_result: ResumeParserLLMOutput | None = None
     best_usage: AgentUsageInfo | None = None
     models = settings.groq_resume_parser_models
@@ -84,7 +87,18 @@ def _run_llm(resume_text: str) -> tuple[ResumeParserLLMOutput, AgentUsageInfo]:
             result = structured_llm.invoke(messages)
             latency_ms = int((time.monotonic() - start) * 1000)
             parsed = result["parsed"]
-            assert isinstance(parsed, ResumeParserLLMOutput)
+            # With include_raw=True a response that doesn't satisfy the schema does NOT raise —
+            # it comes back as parsed=None with the detail in parsing_error. The bare
+            # `assert isinstance(...)` this replaces therefore died with a bare AssertionError,
+            # which (like the 404 above) isn't in the except clause below, so a single
+            # schema-violating response escaped the retry loop and failed the whole request
+            # without the remaining models ever being tried. Re-raising it as an
+            # OutputParserException routes it back into the normal per-model fallback path.
+            if not isinstance(parsed, ResumeParserLLMOutput):
+                err = result["parsing_error"]
+                if isinstance(err, OutputParserException):
+                    raise err
+                raise OutputParserException(f"no schema-valid output (parsing_error={err!r})")
             raw = result["raw"]
             usage = raw.usage_metadata or {}
             usage_info = AgentUsageInfo(
@@ -107,7 +121,7 @@ def _run_llm(resume_text: str) -> tuple[ResumeParserLLMOutput, AgentUsageInfo]:
                 return parsed, usage_info
             best_result = parsed  # keep in case every attempt comes back this way
             best_usage = usage_info
-        except (BadRequestError, RateLimitError, OutputParserException) as exc:
+        except (APIStatusError, OutputParserException) as exc:
             logger.warning("Resume Parser attempt %d failed on model %s: %s", attempt, model, exc)
             last_error = exc
     if best_result is not None:

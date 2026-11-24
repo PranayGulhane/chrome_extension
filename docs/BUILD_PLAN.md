@@ -2,6 +2,11 @@
 
 Source of truth for scope: `docs/prd.html`. This file is the feature breakdown; it does not change often.
 For **current status**, read `docs/PROGRESS.md` instead — that's the file a new session should read first.
+Feature 12 below has its own deep-dive exploration doc, written before it was scoped into the PRD:
+`docs/FORM_AUTOFILL_EXTENSION.md`. Read it before starting that feature — this table only summarizes
+it. (A related but not-yet-scoped exploration, `docs/OPPORTUNITY_SOURCES_EXTENSION.md` — sourcing
+opportunities from company career pages rather than filling a form the user already found — is not
+in this table yet; it hasn't been added to the PRD or planned as a feature.)
 
 ## Structure: vertical feature slices, not backend-first phases
 
@@ -27,6 +32,8 @@ the backend half of Features 1 and 2 below rather than being phases in their own
 | 9 | *(v2)* Post Relevance Scorer | 4 | Agent A4 — match score + reasoning shown in the panel. |
 | 10 | Extension→SPA link, Archiving, Invite/Admin lifecycle | 7, 8 | "Open web app" link in the extension panel; application archive/unarchive (extension History tab + Web SPA tracker); invite codes gain expiry + manual revoke + used-by tracking; admin can revoke a user's access, extend their 30-day-default access window (date picker), and attach notes. |
 | 11 | Duplicate-contact warning at extraction time | 6, 7 | Right after a post is parsed, the extension warns if the poster or recipient email was already contacted from a different application — shown before any drafting happens, with an in-panel popup showing that record without leaving the current extraction result, and a "Don't save this" option to discard the redundant new record before any drafting begins. |
+| 12 | *(v2)* Application form autofill | 1, 2, 3 | PRD §14. Two-step form fill on **any site**, not just LinkedIn: (1) known fields (name/email/phone/employer) autofilled from the active profile via `autocomplete` attribute → label-heuristic matching → small LLM-classifier fallback, written in via native-setter + dispatched events (React/Vue-controlled-input compatibility); (2) open-ended questions drafted by new agent A5 (Form Answer Drafter), grounded in profile/resume/JD context, reused/edited via a new `form_answers` table. Never auto-submits, never auto-advances a multi-step form, never attempts to solve/bypass a CAPTCHA. **Before starting:** an explicit host-permission model decision is needed (per-site allowlist vs. `activeTab`) — see `docs/FORM_AUTOFILL_EXTENSION.md` §5. |
+| 13 | *(v2)* Gmail Follow-Up Manager | 6, 7 | PRD §11. New "Manage Gmail" extension panel view over the user's **whole Sent mailbox**, navigated by **pagination newest-first** (page size 10/20/50/100, user-selectable) with an **optional date-range filter** on top — not a required batch load (corrected mid-design from an earlier date-range-required draft; see PRD §11's Open Question). Each paged-through message is cached into a new `gmail_sent_messages` table and flagged `Platform` or `External` by matching `gmail_message_id` against `applications` (new `applications.gmail_message_id`/`gmail_thread_id` columns, not persisted today despite `gmail_service.send_message` already returning the id). Mailbox-summary metrics (sent via platform / follow-ups sent / replies detected / response rate / awaiting response / avg. days-to-reply) computed over what's been paged through so far, plus Gmail's own approximate `resultSizeEstimate` as a headline "~N sent" count — not a whole-mailbox aggregate, a deliberate trade-off of the pagination model, surfaced in the UI. Sortable/filterable Sent Mail table (source badge, recipient, subject, sent date, last follow-up date, reply status) — filters apply within the current page only. "Follow up" drafts a reply via new agent A6 (Follow-Up Drafter) — grounded in the full original email for Platform rows, subject-only for External rows (no body was ever read) — editable, sent in-thread (`threadId` + `In-Reply-To`/`References` headers) via a new `mail_followups` table. "Archive" sets `gmail_sent_messages.is_archived` (independent of the tracker's own `applications.is_archived`) to stop further follow-up suggestions on that row. **Requires widening the Gmail OAuth scope** from `gmail.send`-only to `gmail.send` + `gmail.metadata` (headers/labels only, never bodies, and not limited to platform-sent threads — Google enforces the body restriction server-side) — every already-connected user must reconnect once to re-consent before follow-up features work for them. |
 
 ## Backlog (cross-cutting, not tied to one feature)
 
@@ -83,7 +90,9 @@ the backend half of Features 1 and 2 below rather than being phases in their own
 - PDF parsing: pdfplumber primary, pypdf fallback. Never PyMuPDF (AGPL-3.0).
 - File storage: Cloudflare R2 (S3-compatible via boto3), path convention `resumes/{user_id}/{profile_id}/{upload_id}.pdf`.
 - Auth: JWT (15 min access / 7 day refresh). Invite-only signup — no public registration.
-- Gmail scope: `gmail.send` only.
+- Gmail scope: `gmail.send` only through Feature 8. Feature 13 adds `gmail.metadata` (headers/labels only,
+  never message bodies) for follow-up reply detection — never widen further to `gmail.readonly` or broader
+  without a real reason revisited at that time (see PRD §11's Open Question).
 - Monorepo layout: `backend/<module>/{models,schemas,service/,routers/}.py` per module; `frontend/extension` +
   `frontend/web`.
 

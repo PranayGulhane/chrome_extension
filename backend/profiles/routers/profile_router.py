@@ -8,13 +8,16 @@ from agents.resume_parser.schemas import ResumeUploadResult
 from core.database import SerializationConflictError, get_db, with_serialization_retry
 from core.dependencies import CurrentUser
 from profiles.schemas import (
+    ClassifyFieldsRequest,
+    ClassifyFieldsResponse,
     CloneProfileRequest,
     ProfileResponse,
     ProfileSummaryResponse,
     ProfileWriteRequest,
     ResumeUploadResponse,
 )
-from profiles.service import profile_service, resume_upload_service
+from profiles.service import field_classifier_service, profile_service, resume_upload_service
+from profiles.service.field_classifier_service import FieldClassificationError
 from profiles.service.profile_service import ProfileNotFoundError
 from profiles.service.resume_upload_service import InvalidResumeFileError, ResumeParsingError
 
@@ -37,6 +40,18 @@ async def create_profile(payload: ProfileWriteRequest, user: CurrentUser, db: Db
 async def list_profiles(user: CurrentUser, db: DbSession) -> list[ProfileSummaryResponse]:
     profiles = await profile_service.list_profiles(db, user.id)
     return [ProfileSummaryResponse.model_validate(p) for p in profiles]
+
+
+@router.post("/classify-fields", response_model=ClassifyFieldsResponse)
+async def classify_fields(payload: ClassifyFieldsRequest, user: CurrentUser, db: DbSession) -> ClassifyFieldsResponse:
+    """Form-autofill's batched LLM fallback (docs/FORM_AUTOFILL_EXTENSION.md §2.2 step 3) — the
+    extension only calls this for fields content/formFiller.ts's own heuristics left unclassified,
+    batched into one request per fill rather than one call per field."""
+    try:
+        matches = await field_classifier_service.classify_fields(db, user.id, payload.fields)
+    except FieldClassificationError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return ClassifyFieldsResponse(matches=matches)
 
 
 @router.get("/{profile_id}", response_model=ProfileResponse)

@@ -12,6 +12,7 @@ import agent_usage.models  # noqa: F401
 import applications.models  # noqa: F401
 import auth.models  # noqa: F401
 import gmail.models  # noqa: F401
+import mailbox.models  # noqa: F401
 import profiles.models  # noqa: F401
 from core.config import get_settings
 from core.database import Base

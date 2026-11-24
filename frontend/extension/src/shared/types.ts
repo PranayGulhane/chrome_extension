@@ -55,6 +55,66 @@ export interface ProfileSummary {
   is_default: boolean;
 }
 
+// Mirrors backend profiles/schemas.py::PersonalInfo field-for-field — the source of truth for
+// Step 1 form-autofill's known-field values (see content/formFiller.ts).
+export interface PersonalInfo {
+  first_name: string | null;
+  last_name: string | null;
+  professional_headline: string | null;
+  email: string | null;
+  phone_number: string | null;
+  current_city: string | null;
+  state_province: string | null;
+  country: string | null;
+  willing_to_relocate: boolean | null;
+  preferred_work_locations: string[];
+  linkedin_url: string | null;
+  github_url: string | null;
+  portfolio_website: string | null;
+  personal_website: string | null;
+  date_of_birth: string | null;
+  nationality: string | null;
+  work_authorization: string | null;
+}
+
+// Trimmed mirror of backend profiles/schemas.py::ExperienceItem — only the fields form-autofill's
+// "current employer"/"current job title" derivation needs, not the full nested shape (responsibilities,
+// projects, etc. aren't used here).
+export interface ExperienceSummary {
+  job_title: string;
+  company_name: string;
+  currently_working_here: boolean;
+  start_date: string | null;
+}
+
+// Mirrors backend profiles/schemas.py::ProfileResponse, trimmed to what form-autofill needs
+// (skills/education/projects/etc. omitted — add them here if a future feature needs them too).
+export interface ProfileDetail {
+  id: string;
+  target_job_title: string;
+  is_default: boolean;
+  personal_info: PersonalInfo;
+  experiences: ExperienceSummary[];
+}
+
+// Mirrors backend profiles/schemas.py::ClassifyFieldsField — one form-autofill field the
+// heuristic pass (content/formFiller.ts) couldn't confidently classify on its own, sent to the
+// batched Field Classifier agent fallback (POST /profiles/classify-fields). `key` in the match
+// response is deliberately typed `string | null` here rather than the narrower ProfileFieldKey
+// union — see content/formFiller.ts's isProfileFieldKey() guard, which validates it against that
+// union at runtime before trusting it (never assume a network response matches its TS type).
+export interface ClassifyFieldsField {
+  index: number;
+  text: string;
+  field_type: string;
+  options: string[];
+}
+
+export interface ClassifyFieldsMatch {
+  index: number;
+  key: string | null;
+}
+
 // Mirrors backend applications/schemas.py::PostExtractionResponse.
 export interface PostExtractionResult {
   application: ApplicationDetail;
@@ -65,6 +125,37 @@ export interface PostExtractionResult {
 export interface GmailStatus {
   connected: boolean;
   gmail_address: string | null;
+}
+
+// Mirrors backend mailbox/schemas.py::SentMailRow.
+export interface SentMailRow {
+  id: string;
+  source: "platform" | "external";
+  poster_name: string | null;
+  company: string | null;
+  application_id: string | null;
+  recipient: string | null;
+  subject: string | null;
+  sent_at: string | null;
+  last_followup_at: string | null;
+  reply_status: "awaiting" | "replied";
+  is_archived: boolean;
+}
+
+// Mirrors backend mailbox/schemas.py::MailboxSummary — deliberately partial/cumulative, not a
+// whole-mailbox aggregate (see that schema's own docstring). result_size_estimate is Gmail's own
+// approximate count for the active query, shown as a headline figure precisely because the rest
+// of this summary only ever covers what's been paged through so far.
+export interface MailboxSummary {
+  result_size_estimate: number | null;
+  loaded_count: number;
+  sent_via_platform: number;
+  followups_sent: number;
+  replies_detected: number;
+  response_rate: number | null;
+  response_rate_platform: number | null;
+  awaiting_response: number;
+  avg_days_to_reply: number | null;
 }
 
 // Mirrors backend metrics/schemas.py::AgentTokenBreakdown.
@@ -102,6 +193,8 @@ export type ContentToBackgroundMessage =
       outreachNote?: string;
     }
   | { type: "GET_PROFILES" }
+  | { type: "GET_PROFILE_DETAIL"; profileId: string }
+  | { type: "CLASSIFY_FIELDS"; fields: ClassifyFieldsField[] }
   | { type: "DRAFT_EMAIL"; applicationId: string; profileId: string }
   | { type: "GMAIL_STATUS" }
   | { type: "GMAIL_CONNECT" }
@@ -115,7 +208,18 @@ export type ContentToBackgroundMessage =
   | { type: "MARK_ARCHIVED"; applicationId: string }
   | { type: "MARK_UNARCHIVED"; applicationId: string }
   | { type: "CHECK_DUPLICATE_RECIPIENT"; applicationId: string }
-  | { type: "DELETE_APPLICATION"; applicationId: string };
+  | { type: "DELETE_APPLICATION"; applicationId: string }
+  | {
+      type: "GET_SENT_MAIL_PAGE";
+      pageSize: 10 | 20 | 50 | 100;
+      pageToken?: string;
+      dateFrom?: string;
+      dateTo?: string;
+    }
+  | { type: "DRAFT_FOLLOWUP"; gmailSentMessageId: string }
+  | { type: "SEND_FOLLOWUP"; gmailSentMessageId: string; subject: string; body: string }
+  | { type: "ARCHIVE_MAIL_ROW"; gmailSentMessageId: string }
+  | { type: "UNARCHIVE_MAIL_ROW"; gmailSentMessageId: string };
 
 export type AuthStateResponse = { authenticated: true; user: AuthUser } | { authenticated: false };
 export type LoginResponse = { ok: true; user: AuthUser } | { ok: false; error: string };
@@ -123,6 +227,8 @@ export type LogoutResponse = { ok: true };
 export type ExtractPostResponse = { ok: true; result: PostExtractionResult } | { ok: false; error: string };
 export type UpdateApplicationResponse = { ok: true; application: ApplicationDetail } | { ok: false; error: string };
 export type GetProfilesResponse = { ok: true; profiles: ProfileSummary[] } | { ok: false; error: string };
+export type GetProfileDetailResponse = { ok: true; profile: ProfileDetail } | { ok: false; error: string };
+export type ClassifyFieldsResponse = { ok: true; matches: ClassifyFieldsMatch[] } | { ok: false; error: string };
 export type DraftEmailResponse = { ok: true; application: ApplicationDetail } | { ok: false; error: string };
 export type GmailStatusResponse = { ok: true; status: GmailStatus } | { ok: false; error: string };
 export type GmailConnectResponse = { ok: true } | { ok: false; error: string };
@@ -146,6 +252,15 @@ export type CheckDuplicateResponse =
     }
   | { ok: false; error: string };
 export type DeleteApplicationResponse = { ok: true } | { ok: false; error: string };
+export type GetSentMailPageResponse =
+  | { ok: true; rows: SentMailRow[]; nextPageToken: string | null; summary: MailboxSummary }
+  | { ok: false; error: string };
+export type DraftFollowupResponse =
+  | { ok: true; subject: string; body: string; grounding: "full" | "subject_only" }
+  | { ok: false; error: string };
+export type SendFollowupResponse = { ok: true; row: SentMailRow } | { ok: false; error: string };
+export type ArchiveMailRowResponse = { ok: true; row: SentMailRow } | { ok: false; error: string };
+export type UnarchiveMailRowResponse = { ok: true; row: SentMailRow } | { ok: false; error: string };
 
 // Background -> content script (fire-and-forget).
 export type BackgroundToContentMessage = { type: "TOGGLE_PANEL" };

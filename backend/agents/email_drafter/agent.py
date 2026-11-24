@@ -1,7 +1,7 @@
 import logging
 import time
 
-from groq import BadRequestError, RateLimitError
+from groq import APIStatusError
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -78,7 +78,14 @@ def _run_llm(context: EmailDraftContext) -> tuple[EmailDraftOutput, AgentUsageIn
         details.append(f"\nCandidate resume excerpt:\n{context.resume_context}")
     system_prompt = _DM_SYSTEM_PROMPT if context.is_dm else _SYSTEM_PROMPT
     messages = [SystemMessage(content=system_prompt), HumanMessage(content="\n".join(details))]
-    max_tokens = 400 if context.is_dm else 1024
+    # The gpt-oss models are *reasoning* models and their reasoning tokens are billed against this
+    # same budget before a single character of the JSON document is emitted. At the old 400/1024
+    # this reliably ran out mid-document and Groq rejected the whole call with a 400
+    # `json_validate_failed: max completion tokens reached before generating a valid document`.
+    # Doubling the cap plus reasoning_effort="low" below fixes it from both sides. Still far under
+    # the ~8000 TPM ceiling this account's on_demand tier applies to prompt + max_tokens combined
+    # (see agents/resume_parser/agent.py for the 413 that limit causes when you overshoot).
+    max_tokens = 800 if context.is_dm else 2048
 
     # method="json_schema" for every fallback model, not the default "function_calling" — see
     # agents/resume_parser/agent.py for the root-caused reason (a Groq structured-output model can
@@ -91,18 +98,43 @@ def _run_llm(context: EmailDraftContext) -> tuple[EmailDraftOutput, AgentUsageIn
     # Multi-model fallback: each attempt uses a different model (index 0 = today's original single
     # default) rather than a blind retry of the same model — this is what actually works around a
     # per-model daily quota exhaustion (Groq's rate limits are per model).
-    last_error: BadRequestError | RateLimitError | OutputParserException | None = None
+    #
+    # Catches groq.APIStatusError (the base class for every HTTP-status error the SDK raises:
+    # BadRequestError, RateLimitError, NotFoundError, ...) rather than naming BadRequest/RateLimit
+    # individually. The narrower tuple meant a decommissioned model id — which comes back as a 404
+    # NotFoundError, not a 400 — escaped the loop entirely and crashed the request on attempt 3,
+    # so the healthy 4th model was never tried. Any genuinely non-transient problem (bad API key,
+    # malformed request) still fails identically on all four models and surfaces as the final raise.
+    last_error: APIStatusError | OutputParserException | None = None
     models = settings.groq_email_drafter_models
     for attempt in range(1, _MAX_FALLBACK_ATTEMPTS + 1):
         model = models[min(attempt - 1, len(models) - 1)]
-        llm = ChatGroq(model=model, api_key=settings.groq_api_key, temperature=0.4, max_tokens=max_tokens)
+        llm = ChatGroq(
+            model=model,
+            api_key=settings.groq_api_key,
+            temperature=0.4,
+            # qwen3.6-27b is a heavy reasoner with no reasoning_effort control and spends its
+            # thinking from this same budget: measured at 2738 output tokens for one short draft,
+            # and it hard-fails (400 json_validate_failed, empty failed_generation) at 2048. 4096
+            # is the smallest cap it was observed to succeed at, with margin.
+            max_tokens=4096 if "qwen" in model else max_tokens,
+            # Only gpt-oss accepts this param — passing it to Llama/Qwen errors.
+            reasoning_effort="low" if "gpt-oss" in model else None,
+        )
         structured_llm = llm.with_structured_output(EmailDraftOutput, include_raw=True, method="json_schema")
         try:
             start = time.monotonic()
             result = structured_llm.invoke(messages)
             latency_ms = int((time.monotonic() - start) * 1000)
             parsed = result["parsed"]
-            assert isinstance(parsed, EmailDraftOutput)
+            # include_raw=True reports a schema-violating response as parsed=None +
+            # parsing_error rather than raising, so the bare assert this replaces escaped the
+            # retry loop as an uncaught AssertionError. See agents/resume_parser/agent.py.
+            if not isinstance(parsed, EmailDraftOutput):
+                err = result["parsing_error"]
+                if isinstance(err, OutputParserException):
+                    raise err
+                raise OutputParserException(f"no schema-valid output (parsing_error={err!r})")
             raw = result["raw"]
             usage = raw.usage_metadata or {}
             usage_info = AgentUsageInfo(
@@ -112,7 +144,7 @@ def _run_llm(context: EmailDraftContext) -> tuple[EmailDraftOutput, AgentUsageIn
                 latency_ms=latency_ms,
             )
             return parsed, usage_info
-        except (BadRequestError, RateLimitError, OutputParserException) as exc:
+        except (APIStatusError, OutputParserException) as exc:
             logger.warning("Email Drafter attempt %d failed on model %s: %s", attempt, model, exc)
             last_error = exc
     assert last_error is not None

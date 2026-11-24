@@ -84,6 +84,12 @@ class Application(Base):
         PG_UUID(as_uuid=True), ForeignKey("resume_uploads.id", ondelete="SET NULL"), nullable=True
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Feature 13 (Gmail Follow-Up Manager) — set at send time from the Gmail API's response, which
+    # gmail_service.send_message already fetched but previously discarded. Null for anything not
+    # sent via this platform's Send flow, or sent before this column existed. mailbox.gmail_sent_messages
+    # matches on gmail_message_id to flag a mailbox row "Platform" vs "External".
+    gmail_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Feature 9 (A4, Post Relevance Scorer) — computed best-effort at extraction time against the
     # user's default profile; both stay null if the user has no profile yet or the scoring call
